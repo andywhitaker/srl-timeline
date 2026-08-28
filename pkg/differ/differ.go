@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"timeline/pkg/filter"
 	"timeline/pkg/models"
 	"timeline/pkg/normalizer"
 )
@@ -16,19 +17,7 @@ func SemanticDiff(oldCfg, newCfg map[string]interface{}, filterPath string) mode
 	normOld := normalizer.NormalizeStructure(oldCfg, true).(map[string]interface{})
 	normNew := normalizer.NormalizeStructure(newCfg, true).(map[string]interface{})
 
-	oldJSON, _ := normalizer.CanonicalJSONString(normOld, 2)
-	newJSON, _ := normalizer.CanonicalJSONString(normNew, 2)
-
 	cleanFilter := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(filterPath, "/")))
-
-	if oldJSON == newJSON {
-		return models.SemanticDiffResult{
-			HasChanges:       false,
-			Changes:          []models.PathChange{},
-			UnifiedDiffLines: []string{},
-			CLIDiffLines:     []string{},
-		}
-	}
 
 	var changes []models.PathChange
 	diffJSONTrees("", normOld, normNew, &changes)
@@ -53,15 +42,25 @@ func SemanticDiff(oldCfg, newCfg map[string]interface{}, filterPath string) mode
 		}
 	}
 
-	// Generate Unified Diff with LCS
-	unifiedDiff := generateUnifiedDiff(oldJSON, newJSON, cleanFilter)
+	// Generate Unified Diff: if filtered, diff the filtered subtrees
+	var oldJSON, newJSON string
+	if cleanFilter != "" {
+		filtOld := filter.FilterConfigSubtree(normOld, filterPath)
+		filtNew := filter.FilterConfigSubtree(normNew, filterPath)
+		oldJSON, _ = normalizer.CanonicalJSONString(filtOld, 2)
+		newJSON, _ = normalizer.CanonicalJSONString(filtNew, 2)
+	} else {
+		oldJSON, _ = normalizer.CanonicalJSONString(normOld, 2)
+		newJSON, _ = normalizer.CanonicalJSONString(normNew, 2)
+	}
+	unifiedDiff := generateUnifiedDiff(oldJSON, newJSON, "")
 
 	// Generate CLI Diff
 	oldCLI := normalizer.JSONToFlatCLI(normOld, "")
 	newCLI := normalizer.JSONToFlatCLI(normNew, "")
 	cliDiff := generateCLIDiff(oldCLI, newCLI, cleanFilter)
 
-	hasChanges := len(filteredChanges) > 0 || len(unifiedDiff) > 0 || len(cliDiff) > 0
+	hasChanges := len(filteredChanges) > 0 || len(cliDiff) > 0 || len(unifiedDiff) > 2
 
 	return models.SemanticDiffResult{
 		HasChanges:       hasChanges,

@@ -44,9 +44,6 @@ func TestAppModelLifecycle(t *testing.T) {
 	if !strings.Contains(viewStr, "TIMELINE") {
 		t.Fatalf("expected TIMELINE in header")
 	}
-	if !strings.Contains(viewStr, "CONFIGURATION TIMELINE") {
-		t.Fatalf("expected CONFIGURATION TIMELINE header")
-	}
 	if !strings.Contains(viewStr, "Diff View") {
 		t.Fatalf("expected Diff View tab")
 	}
@@ -344,5 +341,334 @@ func TestCherryPickModalTreeAndScroll(t *testing.T) {
 	t.Logf("scrolledView:\n%s", scrolledView)
 	if !strings.Contains(scrolledView, "CHERRY-PICK") || !strings.Contains(scrolledView, "[✓]") {
 		t.Fatalf("expected CHERRY-PICK header and checkboxes in view")
+	}
+}
+
+func TestExactScreenHeightFit(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "tui_height_test_*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	repoDir := filepath.Join(tempDir, "repo")
+	backend := gitbackend.NewGitBackend(repoDir)
+
+	cfg := map[string]interface{}{
+		"system": map[string]interface{}{
+			"name": map[string]interface{}{"host-name": "srl-tui-test"},
+		},
+	}
+	_, _, _ = backend.RecordConfigChange(cfg, "admin", "1", "", time.Now().UTC(), "Initial baseline", nil)
+
+	model := NewAppModel(backend, nil, "")
+	for _, w := range []int{80, 100, 120} {
+		for _, h := range []int{24, 30, 36, 40} {
+			resModel, _ := model.Update(tea.WindowSizeMsg{Width: w, Height: h})
+			app := resModel.(AppModel)
+
+			// 1. TabDiff (unfiltered)
+			v := app.View()
+			lines := strings.Split(v, "\n")
+			if len(lines) != h {
+				t.Fatalf("expected exactly %d lines in TabDiff (unfiltered, width %d), got %d", h, w, len(lines))
+			}
+
+			// 2. TabDiff (filtered)
+			resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+			app = resModel.(AppModel)
+			resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e', 't', 'h'}})
+			app = resModel.(AppModel)
+			v = app.View()
+			lines = strings.Split(v, "\n")
+			if len(lines) != h {
+				t.Fatalf("expected exactly %d lines in TabDiff (filtered, width %d), got %d", h, w, len(lines))
+			}
+
+			// 3. TabConfig
+			resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+			app = resModel.(AppModel)
+			resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+			app = resModel.(AppModel)
+			v = app.View()
+			lines = strings.Split(v, "\n")
+			if len(lines) != h {
+				t.Fatalf("expected exactly %d lines in TabConfig (width %d), got %d", h, w, len(lines))
+			}
+
+			// 4. TabBlame
+			resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+			app = resModel.(AppModel)
+			v = app.View()
+			lines = strings.Split(v, "\n")
+			if len(lines) != h {
+				t.Fatalf("expected exactly %d lines in TabBlame (width %d), got %d", h, w, len(lines))
+			}
+		}
+	}
+}
+
+func TestMouseClickHitBoxes(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "tui_mouse_test_*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	repoDir := filepath.Join(tempDir, "repo")
+	backend := gitbackend.NewGitBackend(repoDir)
+
+	cfg := map[string]interface{}{
+		"system": map[string]interface{}{
+			"name": map[string]interface{}{"host-name": "srl-tui-test"},
+		},
+	}
+	_, _, _ = backend.RecordConfigChange(cfg, "admin", "1", "", time.Now().UTC(), "Initial baseline", nil)
+
+	model := NewAppModel(backend, nil, "")
+	resModel, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	app := resModel.(AppModel)
+	timelineW := (120 * 38) / 100
+
+	// 1. Click Filter Bar (Y=2)
+	resModel, _ = app.Update(tea.MouseMsg{X: 20, Y: 2, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.FocusedPane != PaneFilter || !app.FocusFilter {
+		t.Fatalf("expected FocusFilter to be true after clicking filter bar at Y=2")
+	}
+
+	// 2. Click Top Tab: Full Config [c] (Y=4, X = timelineW + 30)
+	resModel, _ = app.Update(tea.MouseMsg{X: timelineW + 30, Y: 4, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.ActiveTab != TabConfig {
+		t.Fatalf("expected ActiveTab to be TabConfig after clicking tab at Y=4, got %v", app.ActiveTab)
+	}
+
+	// 3. Click Top Tab: Blame View [b] (Y=4, X = timelineW + 55)
+	resModel, _ = app.Update(tea.MouseMsg{X: timelineW + 55, Y: 4, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.ActiveTab != TabBlame {
+		t.Fatalf("expected ActiveTab to be TabBlame after clicking tab at Y=4, got %v", app.ActiveTab)
+	}
+
+	// 4. Click Top Tab: Diff View [d] (Y=4, X = timelineW + 10)
+	resModel, _ = app.Update(tea.MouseMsg{X: timelineW + 10, Y: 4, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.ActiveTab != TabDiff {
+		t.Fatalf("expected ActiveTab to be TabDiff after clicking tab at Y=4, got %v", app.ActiveTab)
+	}
+
+	// 5. Click Sub-Option in Diff: Path Changes (Y=6, X = timelineW + 20)
+	resModel, _ = app.Update(tea.MouseMsg{X: timelineW + 20, Y: 6, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.DiffView.DiffMode != "path" {
+		t.Fatalf("expected DiffMode to be path after clicking sub-option at Y=6, got %v", app.DiffView.DiffMode)
+	}
+
+	// 6. Click Sub-Option in Diff: vs Live (Y=6, X = timelineW + 45)
+	resModel, _ = app.Update(tea.MouseMsg{X: timelineW + 45, Y: 6, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if !app.VsLive {
+		t.Fatalf("expected VsLive to be true after clicking vs Live at Y=6")
+	}
+}
+
+func TestTUIFilteringEthernet(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "tui_filter_eth_*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	repoDir := filepath.Join(tempDir, "repo")
+	backend := gitbackend.NewGitBackend(repoDir)
+
+	cfg1 := map[string]interface{}{
+		"system": map[string]interface{}{"name": map[string]interface{}{"host-name": "srl"}},
+		"interface": []interface{}{
+			map[string]interface{}{"name": "ethernet-1/1", "description": "Old Port 1"},
+			map[string]interface{}{"name": "ethernet-1/2", "description": "Port 2"},
+		},
+	}
+	cfg2 := map[string]interface{}{
+		"system": map[string]interface{}{"name": map[string]interface{}{"host-name": "srl"}},
+		"interface": []interface{}{
+			map[string]interface{}{"name": "ethernet-1/1", "description": "New Port 1"},
+			map[string]interface{}{"name": "ethernet-1/2", "description": "Port 2"},
+		},
+	}
+	_, _, _ = backend.RecordConfigChange(cfg1, "admin", "1", "", time.Now().UTC(), "Initial", nil)
+	_, _, _ = backend.RecordConfigChange(cfg2, "admin", "2", "", time.Now().UTC(), "Update Port 1", nil)
+
+	// Create app with filter "ethernet-1/1"
+	model := NewAppModel(backend, nil, "ethernet-1/1")
+	resModel, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	app := resModel.(AppModel)
+
+	// 1. Verify Diff View (Unified) contains ethernet-1/1 diff
+	diffViewStr := app.DiffView.Viewport.View()
+	t.Logf("diffViewStr:\n%s", diffViewStr)
+	if !strings.Contains(diffViewStr, "New Port 1") {
+		t.Fatalf("expected Diff View to contain 'New Port 1' for ethernet-1/1 filter, got:\n%s", diffViewStr)
+	}
+
+	// 2. Switch to Path Diff (Key 2)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	app = resModel.(AppModel)
+	pathViewStr := app.DiffView.Viewport.View()
+	t.Logf("pathViewStr:\n%s", pathViewStr)
+	if !strings.Contains(pathViewStr, "ethernet-1/1") {
+		t.Fatalf("expected Path View to contain ethernet-1/1, got:\n%s", pathViewStr)
+	}
+
+	// 3. Switch to Full Config (Key c) - CLI mode
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	app = resModel.(AppModel)
+	cfgCLIViewStr := app.ConfigView.Viewport.View()
+	t.Logf("cfgCLIViewStr:\n%s", cfgCLIViewStr)
+	if !strings.Contains(cfgCLIViewStr, "set / interface ethernet-1/1") {
+		t.Fatalf("expected Config CLI View to contain 'set / interface ethernet-1/1', got:\n%s", cfgCLIViewStr)
+	}
+	if strings.Contains(cfgCLIViewStr, "ethernet-1/2") {
+		t.Fatalf("did not expect ethernet-1/2 in filtered Config CLI View")
+	}
+
+	// 4. Switch to JSON mode (Key 2) in Full Config
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	app = resModel.(AppModel)
+	cfgJSONViewStr := app.ConfigView.Viewport.View()
+	t.Logf("cfgJSONViewStr:\n%s", cfgJSONViewStr)
+	if !strings.Contains(cfgJSONViewStr, "ethernet-1/1") {
+		t.Fatalf("expected Config JSON View to contain ethernet-1/1, got:\n%s", cfgJSONViewStr)
+	}
+	if strings.Contains(cfgJSONViewStr, "ethernet-1/2") {
+		t.Fatalf("did not expect ethernet-1/2 in filtered Config JSON View")
+	}
+}
+
+func TestBlameViewScrollToBottom(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "tui_blame_scroll_*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	repoDir := filepath.Join(tempDir, "repo")
+	backend := gitbackend.NewGitBackend(repoDir)
+
+	// Create config with multiple interfaces, systems, and a 3000-char TLS certificate
+	cfg := map[string]interface{}{
+		"system": map[string]interface{}{
+			"name": map[string]interface{}{"host-name": "srl"},
+			"tls": map[string]interface{}{
+				"server-profile": map[string]interface{}{
+					"clab-profile": map[string]interface{}{
+						"certificate": "-----BEGIN CERTIFICATE-----\n" + strings.Repeat("MIID9jCCAt6gAwIBAgICBnowDQYJKoZIhvcNAQELBQAwWDELMAkGA1UEBhMCVVMx", 50) + "\n-----END CERTIFICATE-----",
+						"key":         "$aes1$" + strings.Repeat("ATQEFCVvnvpwAG8=$mw6fBitjVHKPNzOKblIPLppe//FjkaT9d/hPSicQk9bvTFET", 40),
+					},
+				},
+			},
+		},
+		"interface": []interface{}{
+			map[string]interface{}{"name": "ethernet-1/1", "description": "Port 1"},
+			map[string]interface{}{"name": "ethernet-1/2", "description": "Port 2"},
+			map[string]interface{}{"name": "ethernet-1/3", "description": "Port 3"},
+		},
+	}
+	_, _, _ = backend.RecordConfigChange(cfg, "admin", "1", "", time.Now().UTC(), "Initial", nil)
+
+	model := NewAppModel(backend, nil, "")
+	resModel, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	app := resModel.(AppModel)
+
+	// Switch to Blame tab
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	app = resModel.(AppModel)
+	if app.ActiveTab != TabBlame {
+		t.Fatalf("expected ActiveTab to be TabBlame")
+	}
+
+	// Focus Detail pane
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyTab})
+	app = resModel.(AppModel)
+
+	// Scroll to bottom with 'G' (end)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	app = resModel.(AppModel)
+
+	// Render view at bottom without errors
+	v := app.View()
+	if !strings.Contains(v, "Subsystem Breakdown") && !strings.Contains(v, "CONTRIBUTOR METRICS") {
+		t.Fatalf("expected Subsystem Breakdown / Metrics visible at bottom of Blame View")
+	}
+}
+
+func TestFilterClearingMechanisms(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "tui_filter_clear_*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	repoDir := filepath.Join(tempDir, "repo")
+	backend := gitbackend.NewGitBackend(repoDir)
+
+	cfg := map[string]interface{}{
+		"system": map[string]interface{}{"name": map[string]interface{}{"host-name": "srl"}},
+	}
+	_, _, _ = backend.RecordConfigChange(cfg, "admin", "1", "", time.Now().UTC(), "Initial", nil)
+
+	// 1. Test clearing via Esc when focused in filter
+	model := NewAppModel(backend, nil, "")
+	resModel, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	app := resModel.(AppModel)
+
+	// Focus filter and type query
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b', 'g', 'p'}})
+	app = resModel.(AppModel)
+	if app.FilterBar.Value() != "bgp" {
+		t.Fatalf("expected filter value 'bgp', got %s", app.FilterBar.Value())
+	}
+
+	// Press Esc while focused -> clears filter
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	app = resModel.(AppModel)
+	if app.FilterBar.Value() != "" {
+		t.Fatalf("expected empty filter after Esc, got %s", app.FilterBar.Value())
+	}
+
+	// 2. Test clearing via Esc when unfocused
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s', 'y', 's'}})
+	app = resModel.(AppModel)
+	// Press Enter to unfocus with query
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = resModel.(AppModel)
+	if app.FocusFilter || app.FilterBar.Value() != "sys" {
+		t.Fatalf("expected unfocused filter with 'sys'")
+	}
+	// Press Esc while unfocused -> clears filter
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	app = resModel.(AppModel)
+	if app.FilterBar.Value() != "" {
+		t.Fatalf("expected empty filter after unfocused Esc")
+	}
+
+	// 3. Test clearing via Mouse Click on [✖ Clear] badge
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i', 'n', 't'}})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = resModel.(AppModel)
+
+	// Click on clear badge (X=115, Y=2)
+	resModel, _ = app.Update(tea.MouseMsg{X: 115, Y: 2, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.FilterBar.Value() != "" {
+		t.Fatalf("expected empty filter after mouse click on clear button")
 	}
 }

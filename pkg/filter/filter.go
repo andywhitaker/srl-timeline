@@ -102,7 +102,7 @@ func tokensMatch(queryTokens, targetTokens []string) bool {
 	if len(targetTokens) == 0 {
 		return false
 	}
-	if isPrefixOf(queryTokens, targetTokens) || isPrefixOf(targetTokens, queryTokens) {
+	if isPrefixOf(queryTokens, targetTokens) {
 		return true
 	}
 	qIdx := 0
@@ -114,31 +114,51 @@ func tokensMatch(queryTokens, targetTokens []string) bool {
 	return qIdx == len(queryTokens)
 }
 
+// pathMatchesQuery returns true if the current token path matches the query.
+func pathMatchesQuery(currentTokens, queryTokens []string, rawQuery string) bool {
+	if rawQuery == "" || len(queryTokens) == 0 {
+		return true
+	}
+	cleanQuery := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(rawQuery, "/")))
+	if cleanQuery == "" {
+		return true
+	}
+
+	slashPath := "/" + strings.Join(currentTokens, "/")
+	if strings.Contains(strings.ToLower(slashPath), cleanQuery) {
+		return true
+	}
+	spacePath := strings.Join(currentTokens, " ")
+	if strings.Contains(strings.ToLower(spacePath), cleanQuery) {
+		return true
+	}
+
+	for _, t := range currentTokens {
+		if strings.Contains(t, cleanQuery) || cleanQuery == t {
+			return true
+		}
+	}
+
+	return tokensMatch(queryTokens, currentTokens)
+}
+
 // FilterConfigSubtree extracts configuration subtrees matching the filter query.
 func FilterConfigSubtree(config map[string]interface{}, filterQuery string) map[string]interface{} {
-	queryTokens := TokenizePath(filterQuery)
-	if len(queryTokens) == 0 {
+	cleanQuery := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(filterQuery, "/")))
+	if cleanQuery == "" {
 		return config
 	}
+
+	queryTokens := TokenizePath(filterQuery)
 
 	result := make(map[string]interface{})
 	for k, v := range config {
 		cleanKey := strings.ToLower(normalizer.StripNamespace(k))
 		keyTokens := []string{cleanKey}
-		if tokensMatch(queryTokens, keyTokens) || isPrefixOf(keyTokens, queryTokens) {
-			childRes := filterSubtreeHelper(v, queryTokens, keyTokens)
-			if childRes != nil {
-				result[k] = childRes
-			}
-		}
-	}
-
-	if len(result) == 0 {
-		// Try deeper search across all top-level keys
-		for k, v := range config {
-			cleanKey := strings.ToLower(normalizer.StripNamespace(k))
-			keyTokens := []string{cleanKey}
-			childRes := filterSubtreeHelper(v, queryTokens, keyTokens)
+		if pathMatchesQuery(keyTokens, queryTokens, filterQuery) {
+			result[k] = v
+		} else {
+			childRes := filterSubtreeHelper(v, queryTokens, keyTokens, filterQuery)
 			if childRes != nil {
 				result[k] = childRes
 			}
@@ -148,8 +168,8 @@ func FilterConfigSubtree(config map[string]interface{}, filterQuery string) map[
 	return result
 }
 
-func filterSubtreeHelper(node interface{}, queryTokens, currentTokens []string) interface{} {
-	if isPrefixOf(queryTokens, currentTokens) {
+func filterSubtreeHelper(node interface{}, queryTokens, currentTokens []string, rawQuery string) interface{} {
+	if pathMatchesQuery(currentTokens, queryTokens, rawQuery) {
 		return node
 	}
 
@@ -159,8 +179,10 @@ func filterSubtreeHelper(node interface{}, queryTokens, currentTokens []string) 
 		for k, child := range v {
 			cleanK := strings.ToLower(normalizer.StripNamespace(k))
 			childTokens := append(append([]string{}, currentTokens...), cleanK)
-			if isPrefixOf(childTokens, queryTokens) || isPrefixOf(queryTokens, childTokens) || tokensMatch(queryTokens, childTokens) {
-				childRes := filterSubtreeHelper(child, queryTokens, childTokens)
+			if pathMatchesQuery(childTokens, queryTokens, rawQuery) {
+				filteredMap[k] = child
+			} else {
+				childRes := filterSubtreeHelper(child, queryTokens, childTokens, rawQuery)
 				if childRes != nil {
 					filteredMap[k] = childRes
 				}
@@ -197,18 +219,18 @@ func filterSubtreeHelper(node interface{}, queryTokens, currentTokens []string) 
 					itemTokens = append(append([]string{}, currentTokens...), keyVal)
 				}
 
-				if isPrefixOf(queryTokens, itemTokens) {
+				if pathMatchesQuery(itemTokens, queryTokens, rawQuery) {
 					filteredList = append(filteredList, item)
-				} else if isPrefixOf(itemTokens, queryTokens) || tokensMatch(queryTokens, itemTokens) {
-					childRes := filterSubtreeHelper(item, queryTokens, itemTokens)
+				} else {
+					childRes := filterSubtreeHelper(item, queryTokens, itemTokens, rawQuery)
 					if childRes != nil {
 						if childMap, ok := childRes.(map[string]interface{}); ok {
 							// Always preserve list identifying key fields from the original itemMap
-							for k, v := range itemMap {
+							for k, val := range itemMap {
 								cleanK := normalizer.StripNamespace(k)
 								if isListKeyName(cleanK) {
 									if _, exists := childMap[k]; !exists {
-										childMap[k] = v
+										childMap[k] = val
 									}
 								}
 							}
@@ -219,7 +241,7 @@ func filterSubtreeHelper(node interface{}, queryTokens, currentTokens []string) 
 					}
 				}
 			} else {
-				if tokensMatch(queryTokens, currentTokens) {
+				if pathMatchesQuery(currentTokens, queryTokens, rawQuery) {
 					filteredList = append(filteredList, item)
 				}
 			}
@@ -230,7 +252,9 @@ func filterSubtreeHelper(node interface{}, queryTokens, currentTokens []string) 
 		return nil
 
 	default:
-		if tokensMatch(queryTokens, currentTokens) {
+		scalarStr := strings.ToLower(normalizer.FormatScalarCLI(node))
+		cleanQuery := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(rawQuery, "/")))
+		if strings.Contains(scalarStr, cleanQuery) || pathMatchesQuery(currentTokens, queryTokens, rawQuery) {
 			return node
 		}
 		return nil

@@ -17,22 +17,48 @@ func NewFooterBarModel(width int) FooterBarModel {
 }
 
 // View renders the bottom keyboard shortcuts bar.
-func (m FooterBarModel) View() string {
-	shortcuts := []struct {
+func (m FooterBarModel) View(filterActive bool) string {
+	var shortcuts []struct {
 		key  string
 		desc string
-	}{
-		{"/", "Filter"},
-		{"Tab", "Pane"},
-		{"d / c / b", "Tabs"},
-		{"1 / 2 / 3", "Formats"},
-		{"4 / v", "vs Live"},
-		{"r", "Restore"},
-		{"p", "Cherry-Pick"},
-		{"e", "Export"},
-		{"g", "Remote Git"},
-		{"?", "Help"},
-		{"q", "Quit"},
+	}
+
+	if filterActive {
+		shortcuts = append(shortcuts, struct {
+			key  string
+			desc string
+		}{"Esc", "Clear"})
+	}
+
+	if m.Width >= 115 {
+		shortcuts = append(shortcuts, []struct {
+			key  string
+			desc string
+		}{
+			{"/", "Filter"},
+			{"Tab", "Pane"},
+			{"d/c/b", "View"},
+			{"1-3", "Format"},
+			{"4/v", "Live"},
+			{"r", "Restore"},
+			{"p", "Cherry"},
+			{"e", "Export"},
+			{"g", "Git"},
+			{"?", "Help"},
+			{"q", "Quit"},
+		}...)
+	} else {
+		shortcuts = append(shortcuts, []struct {
+			key  string
+			desc string
+		}{
+			{"/", "Filter"},
+			{"Tab", "Pane"},
+			{"d/c/b", "View"},
+			{"r", "Restore"},
+			{"?", "Help"},
+			{"q", "Quit"},
+		}...)
 	}
 
 	var parts []string

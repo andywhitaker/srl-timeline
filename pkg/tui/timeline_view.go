@@ -87,7 +87,11 @@ func (m *TimelineViewModel) SetSize(width, height int) {
 	m.Width = width
 	m.Height = height
 	m.Viewport.Width = width - 2
-	m.Viewport.Height = height - 2
+	vpHeight := height - 1
+	if vpHeight < 1 {
+		vpHeight = 1
+	}
+	m.Viewport.Height = vpHeight
 	m.UpdateViewportContent()
 }
 
@@ -196,10 +200,10 @@ func (m *TimelineViewModel) UpdateViewportContent() {
 // View renders the visual timeline component.
 func (m TimelineViewModel) View() string {
 	borderStyle := StyleInactiveBorder
-	headerText := " 📜 CONFIGURATION TIMELINE (Press [Tab] or [←] to focus) "
+	headerText := " 📜 TIMELINE "
 	if m.IsFocused {
 		borderStyle = StyleActiveBorder
-		headerText = " 📜 CONFIGURATION TIMELINE [FOCUSED] - [↑/↓/j/k] Navigate | [Tab] Detail "
+		headerText = " 📜 TIMELINE [FOCUSED] "
 	}
 
 	header := StylePanelHeader.Render(headerText)

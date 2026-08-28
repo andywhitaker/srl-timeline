@@ -22,6 +22,9 @@ import (
 	"github.com/muesli/termenv"
 )
 
+// Version is the current release version of srl-timeline.
+const Version = "0.0.2"
+
 func init() {
 	if os.Getenv("NO_COLOR") == "" {
 		lipgloss.SetColorProfile(termenv.TrueColor)
@@ -29,6 +32,11 @@ func init() {
 }
 
 func main() {
+	if len(os.Args) >= 2 && (os.Args[1] == "-v" || os.Args[1] == "--version" || os.Args[1] == "version") {
+		fmt.Printf("srl-timeline version %s\n", Version)
+		return
+	}
+
 	if len(os.Args) < 2 || strings.HasPrefix(os.Args[1], "-") {
 		// Launch interactive Bubble Tea TUI
 		initialFilter := ""
@@ -57,6 +65,9 @@ func main() {
 	}
 
 	switch subcommand {
+	case "version":
+		fmt.Printf("srl-timeline version %s\n", Version)
+		return
 	case "tui":
 		initialFilter := ""
 		for i, arg := range os.Args {

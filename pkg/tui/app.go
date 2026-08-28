@@ -297,7 +297,10 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 1. If Filter input is focused
 		if m.FocusedPane == PaneFilter || m.FocusFilter {
 			switch msg.String() {
-			case "esc", "enter":
+			case "esc":
+				if m.FilterBar.Value() != "" {
+					m.FilterBar.Clear()
+				}
 				m.FocusFilter = false
 				m.FocusedPane = PaneTimeline
 				m.FilterBar.Blur()
@@ -305,6 +308,20 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.DiffView.IsFocused = false
 				m.ConfigView.IsFocused = false
 				m.BlameView.IsFocused = false
+				m.refreshTimeline()
+				return m, nil
+			case "enter":
+				m.FocusFilter = false
+				m.FocusedPane = PaneTimeline
+				m.FilterBar.Blur()
+				m.TimelineView.IsFocused = true
+				m.DiffView.IsFocused = false
+				m.ConfigView.IsFocused = false
+				m.BlameView.IsFocused = false
+				m.refreshTimeline()
+				return m, nil
+			case "ctrl+u", "ctrl+c":
+				m.FilterBar.Clear()
 				m.refreshTimeline()
 				return m, nil
 			default:
@@ -326,8 +343,8 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.FilterBar.Focus()
 		}
 
-		// 3. Clear filter on Esc
-		if msg.String() == "esc" && m.FilterBar.Value() != "" {
+		// 3. Clear filter on Esc or 'x'
+		if (msg.String() == "esc" || msg.String() == "x") && m.FilterBar.Value() != "" {
 			m.FilterBar.Clear()
 			m.refreshTimeline()
 			return m, nil
@@ -603,8 +620,17 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		timelineWidth = 35
 	}
 
-	// 1. Click on Filter Bar (Y == 1)
-	if msg.Y == 1 && msg.Type == tea.MouseLeft {
+	// 1. Click on Filter Bar (Y == 2 or Y == 3)
+	if (msg.Y == 2 || msg.Y == 3) && msg.Type == tea.MouseLeft {
+		if m.FilterBar.Value() != "" && msg.X >= m.Width-25 {
+			m.FilterBar.Clear()
+			m.FocusFilter = false
+			m.FocusedPane = PaneTimeline
+			m.FilterBar.Blur()
+			m.TimelineView.IsFocused = true
+			m.refreshTimeline()
+			return m, nil
+		}
 		m.FocusFilter = true
 		m.FocusedPane = PaneFilter
 		m.TimelineView.IsFocused = false
@@ -614,10 +640,10 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, m.FilterBar.Focus()
 	}
 
-	// 2. Click on Top Tab Bar (Y == 2 or Y == 3, X > timelineWidth)
-	if (msg.Y == 2 || msg.Y == 3) && msg.X > timelineWidth && msg.Type == tea.MouseLeft {
+	// 2. Click on Top Tab Bar (Y == 4, X > timelineWidth)
+	if msg.Y == 4 && msg.X > timelineWidth && msg.Type == tea.MouseLeft {
 		tabOffset := msg.X - timelineWidth
-		if tabOffset >= 1 && tabOffset <= 20 {
+		if tabOffset >= 1 && tabOffset <= 22 {
 			m.ActiveTab = TabDiff
 			m.FocusedPane = PaneDetail
 			m.TimelineView.IsFocused = false
@@ -626,7 +652,7 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.BlameView.IsFocused = true
 			m.updateActiveTabContent()
 			return m, nil
-		} else if tabOffset >= 21 && tabOffset <= 42 {
+		} else if tabOffset >= 23 && tabOffset <= 46 {
 			m.ActiveTab = TabConfig
 			m.FocusedPane = PaneDetail
 			m.TimelineView.IsFocused = false
@@ -635,7 +661,7 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.BlameView.IsFocused = true
 			m.updateActiveTabContent()
 			return m, nil
-		} else if tabOffset >= 43 && tabOffset <= 65 {
+		} else if tabOffset >= 47 && tabOffset <= 70 {
 			m.ActiveTab = TabBlame
 			m.FocusedPane = PaneDetail
 			m.TimelineView.IsFocused = false
@@ -709,8 +735,8 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			}
 
 			// Sub-row hit testing for commit list:
-			if msg.Y >= 4 {
-				clickedRow := (msg.Y - 4 + m.TimelineView.Viewport.YOffset) / 3
+			if msg.Y >= 6 {
+				clickedRow := (msg.Y - 6 + m.TimelineView.Viewport.YOffset) / 3
 				if clickedRow >= 0 && clickedRow < len(m.TimelineView.Commits) {
 					m.TimelineView.SelectedIndex = clickedRow
 					m.TimelineView.UpdateViewportContent()
@@ -737,19 +763,19 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 			tabOffset := msg.X - timelineWidth
 
-			// Sub-Option Bar Clicks (Y == 4 or Y == 5)
-			if msg.Y == 4 || msg.Y == 5 {
+			// Sub-Option Controls Bar Clicks (Y == 6 or Y == 7)
+			if msg.Y == 6 || msg.Y == 7 {
 				if m.ActiveTab == TabDiff {
-					if tabOffset >= 2 && tabOffset <= 17 {
+					if tabOffset >= 2 && tabOffset <= 14 {
 						m.DiffView.DiffMode = "unified"
 						m.DiffView.UpdateContent()
-					} else if tabOffset >= 18 && tabOffset <= 39 {
+					} else if tabOffset >= 15 && tabOffset <= 26 {
 						m.DiffView.DiffMode = "path"
 						m.DiffView.UpdateContent()
-					} else if tabOffset >= 40 && tabOffset <= 56 {
+					} else if tabOffset >= 27 && tabOffset <= 37 {
 						m.DiffView.DiffMode = "cli"
 						m.DiffView.UpdateContent()
-					} else if tabOffset >= 57 && tabOffset <= 79 {
+					} else if tabOffset >= 38 && tabOffset <= 56 {
 						m.VsLive = !m.VsLive
 						m.DiffView.VsLive = m.VsLive
 						m.updateActiveTabContent()
@@ -758,35 +784,14 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 							return m, fetchLiveConfigCmd(m.SRLClient)
 						}
 						return m, nil
-					} else if tabOffset >= 82 && tabOffset <= 96 {
-						selected := m.TimelineView.SelectedCommit()
-						if selected != nil {
-							m.RestoreModal = modals.NewRestoreModal(*selected, m.Width, m.Height)
-							m.ActiveModal = ModalRestore
-						}
-					} else if tabOffset >= 97 && tabOffset <= 118 {
-						selected := m.TimelineView.SelectedCommit()
-						if selected != nil {
-							curCfg := m.GitBackend.GetConfigAtCommit(selected.FullSHA)
-							prevCfg := m.GitBackend.GetConfigAtCommit(fmt.Sprintf("%s~1", selected.FullSHA))
-							diffRes := differ.SemanticDiff(prevCfg, curCfg, "")
-							m.CherryPickModal = modals.NewCherryPickModal(*selected, diffRes.Changes, curCfg, m.Width, m.Height)
-							m.ActiveModal = ModalCherryPick
-						}
 					}
 				} else if m.ActiveTab == TabConfig {
-					if tabOffset >= 2 && tabOffset <= 25 {
+					if tabOffset >= 2 && tabOffset <= 18 {
 						m.ConfigView.FormatMode = "cli"
 						m.ConfigView.UpdateContent()
-					} else if tabOffset >= 26 && tabOffset <= 50 {
+					} else if tabOffset >= 19 && tabOffset <= 45 {
 						m.ConfigView.FormatMode = "json"
 						m.ConfigView.UpdateContent()
-					} else if tabOffset >= 52 && tabOffset <= 75 {
-						selected := m.TimelineView.SelectedCommit()
-						if selected != nil {
-							m.ExportModal = modals.NewExportModal(*selected, m.Width, m.Height)
-							m.ActiveModal = ModalExport
-						}
 					}
 				}
 			}
@@ -938,9 +943,14 @@ func (m *AppModel) resizeLayout(width, height int) {
 	m.FilterBar.SetWidth(width)
 	m.FooterBar.Width = width
 
-	paneHeight := height - 7
-	if paneHeight < 10 {
-		paneHeight = 10
+	timelinePaneHeight := height - 8
+	if timelinePaneHeight < 5 {
+		timelinePaneHeight = 5
+	}
+
+	detailPaneHeight := height - 9
+	if detailPaneHeight < 4 {
+		detailPaneHeight = 4
 	}
 
 	timelineWidth := (width * 38) / 100
@@ -948,11 +958,14 @@ func (m *AppModel) resizeLayout(width, height int) {
 		timelineWidth = 35
 	}
 	detailWidth := width - timelineWidth - 2
+	if detailWidth < 40 {
+		detailWidth = 40
+	}
 
-	m.TimelineView.SetSize(timelineWidth, paneHeight)
-	m.DiffView.SetSize(detailWidth, paneHeight)
-	m.ConfigView.SetSize(detailWidth, paneHeight)
-	m.BlameView.SetSize(detailWidth, paneHeight)
+	m.TimelineView.SetSize(timelineWidth, timelinePaneHeight)
+	m.DiffView.SetSize(detailWidth, detailPaneHeight)
+	m.ConfigView.SetSize(detailWidth, detailPaneHeight)
+	m.BlameView.SetSize(detailWidth, detailPaneHeight)
 
 	m.refreshTimeline()
 }
@@ -1070,17 +1083,19 @@ func (m AppModel) View() string {
 	}
 
 	// 7. Footer Bar
-	footer := m.FooterBar.View()
+	footer := m.FooterBar.View(m.FilterBar.Value() != "")
 
-	// Combine all sections
-	baseScreen := lipgloss.JoinVertical(
-		lipgloss.Left,
-		header,
-		filterBar,
-		notifView,
-		mainSplit,
-		footer,
-	)
+	// Combine all sections cleanly without empty newline gaps
+	var sections []string
+	sections = append(sections, header)
+	sections = append(sections, filterBar)
+	if notifView != "" {
+		sections = append(sections, notifView)
+	}
+	sections = append(sections, mainSplit)
+	sections = append(sections, footer)
+
+	baseScreen := lipgloss.JoinVertical(lipgloss.Left, sections...)
 
 	// Overlay Modals if active
 	switch m.ActiveModal {

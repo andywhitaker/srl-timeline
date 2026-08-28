@@ -127,3 +127,58 @@ func TestSemanticDiffInterfaceDescriptionChange(t *testing.T) {
 		t.Fatalf("expected unified diff to show -Original and +Updated description, got:\n%v", res.UnifiedDiffLines)
 	}
 }
+
+func TestSemanticDiffWithInterfaceFilter(t *testing.T) {
+	cfg1 := map[string]interface{}{
+		"interface": []interface{}{
+			map[string]interface{}{
+				"name":        "ethernet-1/1",
+				"description": "Original Description",
+			},
+			map[string]interface{}{
+				"name":        "ethernet-1/2",
+				"description": "Old Port 2",
+			},
+		},
+	}
+	cfg2 := map[string]interface{}{
+		"interface": []interface{}{
+			map[string]interface{}{
+				"name":        "ethernet-1/1",
+				"description": "New Description",
+			},
+			map[string]interface{}{
+				"name":        "ethernet-1/2",
+				"description": "New Port 2",
+			},
+		},
+	}
+
+	res := SemanticDiff(cfg1, cfg2, "ethernet-1/1")
+	if !res.HasChanges {
+		t.Fatalf("expected changes for ethernet-1/1")
+	}
+	if len(res.Changes) != 1 {
+		t.Fatalf("expected 1 change for ethernet-1/1, got %d: %+v", len(res.Changes), res.Changes)
+	}
+	if !strings.Contains(res.Changes[0].Path, "ethernet-1/1") {
+		t.Fatalf("expected path to contain ethernet-1/1, got %s", res.Changes[0].Path)
+	}
+
+	var hasDel, hasAdd bool
+	for _, l := range res.UnifiedDiffLines {
+		if strings.Contains(l, "-") && strings.Contains(l, "Original Description") {
+			hasDel = true
+		}
+		if strings.Contains(l, "+") && strings.Contains(l, "New Description") {
+			hasAdd = true
+		}
+		if strings.Contains(l, "Port 2") {
+			t.Fatalf("did not expect Port 2 to appear in filtered diff, got: %s", l)
+		}
+	}
+	if !hasDel || !hasAdd {
+		t.Fatalf("expected unified diff to show -Original and +New description for ethernet-1/1, got:\n%v", res.UnifiedDiffLines)
+	}
+}
+

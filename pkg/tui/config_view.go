@@ -24,9 +24,13 @@ type ConfigViewModel struct {
 	IsFocused    bool
 }
 
-// NewConfigViewModel creates a new config viewer.
+// NewConfigViewModel creates a new configuration viewer.
 func NewConfigViewModel(width, height int) ConfigViewModel {
-	vp := viewport.New(width, height)
+	vpHeight := height - 3
+	if vpHeight < 1 {
+		vpHeight = 1
+	}
+	vp := viewport.New(width-4, vpHeight)
 	return ConfigViewModel{
 		ConfigData: make(map[string]interface{}),
 		FormatMode: "cli",
@@ -49,7 +53,11 @@ func (m *ConfigViewModel) SetSize(width, height int) {
 	m.Width = width
 	m.Height = height
 	m.Viewport.Width = width - 4
-	m.Viewport.Height = height - 5
+	vpHeight := height - 3
+	if vpHeight < 1 {
+		vpHeight = 1
+	}
+	m.Viewport.Height = vpHeight
 	m.lastRendered = ""
 	m.UpdateContent()
 }
@@ -61,15 +69,17 @@ func (m *ConfigViewModel) UpdateContent() {
 		return
 	}
 
-	data := m.ConfigData
-	if m.FilterPath != "" {
-		data = filter.FilterConfigSubtree(data, m.FilterPath)
-	}
-
 	var sb strings.Builder
 
 	if m.FormatMode == "cli" {
-		lines := normalizer.JSONToFlatCLI(data, "")
+		lines := normalizer.JSONToFlatCLI(m.ConfigData, "")
+		if m.FilterPath != "" {
+			lines = filter.FilterCLILines(lines, m.FilterPath)
+		}
+		if len(lines) == 0 {
+			m.Viewport.SetContent(lipgloss.NewStyle().Foreground(ColorWarning).Padding(1, 2).Render(fmt.Sprintf("No CLI configuration statements match filter '%s'", m.FilterPath)))
+			return
+		}
 		for _, l := range lines {
 			if strings.HasPrefix(l, "set / interface") {
 				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#79c0ff")).Render(l))
@@ -85,6 +95,14 @@ func (m *ConfigViewModel) UpdateContent() {
 			sb.WriteString("\n")
 		}
 	} else {
+		data := m.ConfigData
+		if m.FilterPath != "" {
+			data = filter.FilterConfigSubtree(data, m.FilterPath)
+		}
+		if len(data) == 0 {
+			m.Viewport.SetContent(lipgloss.NewStyle().Foreground(ColorWarning).Padding(1, 2).Render(fmt.Sprintf("No JSON configuration subtrees match filter '%s'", m.FilterPath)))
+			return
+		}
 		jsonStr, _ := normalizer.CanonicalJSONString(data, 2)
 		lines := strings.Split(jsonStr, "\n")
 		for _, l := range lines {
@@ -133,27 +151,19 @@ func (m ConfigViewModel) View() string {
 		Padding(0, 1).
 		MarginRight(1)
 
-	btnCLI := btnInactiveStyle.Render("[1] Flat CLI Syntax")
+	btnCLI := btnInactiveStyle.Render("[1] Flat CLI")
 	if m.FormatMode == "cli" {
-		btnCLI = btnActiveStyle.Render("▶ [1] Flat CLI Syntax")
+		btnCLI = btnActiveStyle.Render("▶ [1] Flat CLI")
 	}
 
-	btnJSON := btnInactiveStyle.Render("[2] JSON Hierarchy")
+	btnJSON := btnInactiveStyle.Render("[2] Hierarchical JSON")
 	if m.FormatMode == "json" {
-		btnJSON = btnActiveStyle.Render("▶ [2] JSON Hierarchy")
+		btnJSON = btnActiveStyle.Render("▶ [2] Hierarchical JSON")
 	}
 
-	btnExport := lipgloss.NewStyle().
-		Background(lipgloss.Color("#238636")).
-		Foreground(lipgloss.Color("#ffffff")).
-		Bold(true).
-		Padding(0, 1).
-		Render("[e] Export Config")
-
-	// Calculate scroll progress badge
+	totalLines := m.Viewport.TotalLineCount()
 	topLine := m.Viewport.YOffset + 1
 	botLine := m.Viewport.YOffset + m.Viewport.Height
-	totalLines := m.Viewport.TotalLineCount()
 	if botLine > totalLines {
 		botLine = totalLines
 	}
@@ -169,13 +179,10 @@ func (m ConfigViewModel) View() string {
 	} else {
 		scrollBadge = lipgloss.NewStyle().Background(lipgloss.Color("#1f6feb")).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1).Render(fmt.Sprintf("↕ %d%% (Line %d-%d/%d)", pct, topLine, botLine, totalLines))
 	}
-
 	controls := lipgloss.JoinHorizontal(
 		lipgloss.Center,
 		btnCLI, btnJSON,
 		"  ",
-		btnExport,
-		"    ",
 		scrollBadge,
 	)
 
@@ -186,10 +193,10 @@ func (m ConfigViewModel) View() string {
 		Render(controls)
 
 	borderStyle := StyleInactiveBorder
-	headerText := " 📄 FULL CONFIGURATION (Press [Tab] or [→] to focus scroll) "
+	headerText := " 📄 FULL CONFIGURATION "
 	if m.IsFocused {
 		borderStyle = StyleActiveBorder
-		headerText = " 📄 FULL CONFIGURATION [FOCUSED] - [1/2] Sub-formats | [d/c/b] Switch View | [↑/↓/PgUp/PgDn] Scroll "
+		headerText = " 📄 FULL CONFIGURATION [FOCUSED] "
 	}
 
 	header := StylePanelHeader.Render(headerText)
@@ -197,7 +204,7 @@ func (m ConfigViewModel) View() string {
 	return borderStyle.
 		Width(m.Width).
 		Height(m.Height).
-		Render(fmt.Sprintf("%s\n%s\n\n%s", header, controlsBar, m.Viewport.View()))
+		Render(fmt.Sprintf("%s\n%s\n%s", header, controlsBar, m.Viewport.View()))
 }
 
 // Update handles format toggle key events and viewport scrolling.

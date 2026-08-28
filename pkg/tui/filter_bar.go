@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -20,13 +21,18 @@ type FilterBarModel struct {
 // NewFilterBarModel creates a new FilterBar component.
 func NewFilterBarModel(width int) FilterBarModel {
 	ti := textinput.New()
-	ti.Placeholder = "Type path or element (e.g. interface, bgp, acl, system)... [Press '/' to search]"
+	ti.Placeholder = "path (e.g. interface, bgp)"
 	ti.Prompt = " 🔍 FILTER: "
 	ti.PromptStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#58a6ff"))
 	ti.TextStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff"))
 	ti.PlaceholderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7d8590"))
 	ti.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#58a6ff"))
-	ti.Width = width - 35
+
+	inputW := width - 36
+	if inputW < 12 {
+		inputW = 12
+	}
+	ti.Width = inputW
 
 	return FilterBarModel{
 		TextInput:  ti,
@@ -76,7 +82,11 @@ func (m *FilterBarModel) Clear() {
 // SetWidth handles terminal resizing.
 func (m *FilterBarModel) SetWidth(width int) {
 	m.Width = width
-	m.TextInput.Width = width - 35
+	inputW := width - 42
+	if inputW < 12 {
+		inputW = 12
+	}
+	m.TextInput.Width = inputW
 }
 
 // Update processes Bubble Tea input messages.
@@ -88,42 +98,58 @@ func (m FilterBarModel) Update(msg tea.Msg) (FilterBarModel, tea.Cmd) {
 
 // View renders the search bar with badge and status.
 func (m FilterBarModel) View() string {
-	var badgeText string
-	if m.Value() == "" {
-		badgeText = fmt.Sprintf("All Commits (%d)", m.TotalCount)
-	} else {
-		badgeText = fmt.Sprintf("Filtered (%d/%d matching)", m.MatchCount, m.TotalCount)
-	}
-
-	badgeStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("#21262d")).
-		Foreground(lipgloss.Color("#58a6ff")).
-		Bold(true).
-		Padding(0, 1)
+	var rightParts []string
 
 	if m.Value() != "" {
-		badgeStyle = lipgloss.NewStyle().
+		badgeStyle := lipgloss.NewStyle().
 			Background(lipgloss.Color("#238636")).
 			Foreground(lipgloss.Color("#ffffff")).
 			Bold(true).
 			Padding(0, 1)
-	}
+		rightParts = append(rightParts, badgeStyle.Render(fmt.Sprintf("Filtered (%d/%d)", m.MatchCount, m.TotalCount)))
 
-	badge := badgeStyle.Render(badgeText)
-
-	var hint string
-	if m.IsFocused {
-		hint = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#d29922")).
+		clearStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#da3633")).
+			Foreground(lipgloss.Color("#ffffff")).
 			Bold(true).
-			Render("[Enter to apply | Esc to clear]")
+			Padding(0, 1)
+		rightParts = append(rightParts, clearStyle.Render("✖ Clear [Esc]"))
 	} else {
-		hint = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#7d8590")).
-			Render("[Press '/' to filter]")
+		if m.Width >= 100 {
+			if m.IsFocused {
+				rightParts = append(rightParts, lipgloss.NewStyle().Foreground(lipgloss.Color("#d29922")).Render("[Enter/Esc to exit]"))
+			} else {
+				rightParts = append(rightParts, lipgloss.NewStyle().Foreground(lipgloss.Color("#7d8590")).Render("[Press '/' to filter]"))
+			}
+		}
+		badgeStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("#21262d")).
+			Foreground(lipgloss.Color("#58a6ff")).
+			Bold(true).
+			Padding(0, 1)
+		rightParts = append(rightParts, badgeStyle.Render(fmt.Sprintf("All (%d)", m.TotalCount)))
 	}
 
-	inputView := m.TextInput.View()
+	rightContent := lipgloss.JoinHorizontal(lipgloss.Center, rightParts...)
+	rightLen := lipgloss.Width(rightContent)
+
+	promptLen := 14
+	availInput := m.Width - rightLen - promptLen - 6
+	if availInput < 10 {
+		availInput = 10
+	}
+	m.TextInput.Width = availInput
+
+	leftContent := m.TextInput.View()
+	leftLen := lipgloss.Width(leftContent)
+
+	availSpace := m.Width - leftLen - rightLen - 4
+	if availSpace < 1 {
+		availSpace = 1
+	}
+	spacer := strings.Repeat(" ", availSpace)
+
+	barContent := lipgloss.JoinHorizontal(lipgloss.Center, leftContent, spacer, rightContent)
 
 	containerStyle := lipgloss.NewStyle().
 		Background(lipgloss.Color("#161b22")).
@@ -140,15 +166,6 @@ func (m FilterBarModel) View() string {
 			BorderBottomForeground(lipgloss.Color("#58a6ff")).
 			Padding(0, 1)
 	}
-
-	barContent := lipgloss.JoinHorizontal(
-		lipgloss.Center,
-		inputView,
-		"  ",
-		hint,
-		"  ",
-		badge,
-	)
 
 	return containerStyle.Width(m.Width).Render(barContent)
 }

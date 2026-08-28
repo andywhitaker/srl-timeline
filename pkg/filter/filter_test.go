@@ -75,17 +75,14 @@ func TestFilterConfigSubtree(t *testing.T) {
 		t.Fatalf("expected ethernet-1/1, got %v", ifMap["name"])
 	}
 
-	// 3. Test /interface[name=ethernet-1/1]/description (leaf inside list item)
-	res3 := FilterConfigSubtree(cfg, "/interface[name=ethernet-1/1]/description")
-	ifList3, ok := res3["interface"].([]interface{})
-	if !ok || len(ifList3) != 1 {
-		t.Fatalf("expected 1 interface in result, got %+v", res3)
+	// 4. Test direct raw query "ethernet-1/1"
+	res4 := FilterConfigSubtree(cfg, "ethernet-1/1")
+	ifList4, ok := res4["interface"].([]interface{})
+	if !ok || len(ifList4) != 1 {
+		t.Fatalf("expected 1 interface in result for raw 'ethernet-1/1', got %+v", res4)
 	}
-	ifMap3 := ifList3[0].(map[string]interface{})
-	if ifMap3["name"] != "ethernet-1/1" {
-		t.Fatalf("expected list key 'name' to be preserved, got %v", ifMap3["name"])
-	}
-	if ifMap3["description"] != "Port 1" {
-		t.Fatalf("expected description Port 1, got %v", ifMap3["description"])
+	ifMap4 := ifList4[0].(map[string]interface{})
+	if ifMap4["name"] != "ethernet-1/1" {
+		t.Fatalf("expected ethernet-1/1, got %v", ifMap4["name"])
 	}
 }

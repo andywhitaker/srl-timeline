@@ -30,23 +30,23 @@ func NewHeaderBarModel(width int) HeaderBarModel {
 func (m HeaderBarModel) View() string {
 	title := StyleAppTitle.Render("⏳ TIMELINE")
 	device := StyleBadgeDevice.Render("NODE: " + m.Hostname)
-	version := StyleBadgeVersion.Render(m.Version)
 
-	realtime := StyleBadgeActive.Render("● REALTIME ACTIVE")
+	realtime := StyleBadgeActive.Render("● REALTIME")
 	if !m.IsRealtime {
 		realtime = lipgloss.NewStyle().Background(ColorMuted).Foreground(lipgloss.Color("#ffffff")).Padding(0, 1).Render("○ PAUSED")
 	}
 
-	sync := StyleBadgeSync.Render("SYNC: " + m.SyncStatus)
+	var elements []string
+	elements = append(elements, title, device)
 
-	bar := lipgloss.JoinHorizontal(
-		lipgloss.Center,
-		title,
-		device,
-		version,
-		realtime,
-		sync,
-	)
+	if m.Width >= 100 {
+		version := StyleBadgeVersion.Render(m.Version)
+		sync := StyleBadgeSync.Render("SYNC: " + m.SyncStatus)
+		elements = append(elements, version, realtime, sync)
+	} else if m.Width >= 75 {
+		elements = append(elements, realtime)
+	}
 
+	bar := lipgloss.JoinHorizontal(lipgloss.Center, elements...)
 	return StyleHeaderContainer.Width(m.Width).Render(bar)
 }
