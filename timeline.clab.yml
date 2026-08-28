@@ -1,0 +1,14 @@
+name: srl-timeline
+prefix: ""
+
+topology:
+  nodes:
+    srl-timeline:
+      kind: nokia_srlinux
+      image: ghcr.io/nokia/srlinux:latest
+      type: ixr-d2l
+      binds:
+        - bin/timeline:/usr/local/bin/timeline
+        - timeline_config.yml:/etc/opt/srlinux/appmgr/timeline_config.yml
+        - /usr/bin/git:/usr/bin/git:ro
+        - /usr/lib/git-core:/usr/lib/git-core:ro

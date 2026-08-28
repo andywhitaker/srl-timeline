@@ -1,0 +1,8 @@
+timeline:
+  path: /usr/local/bin
+  launch-command: ./timeline daemon start
+  search-command: ./timeline daemon start
+  author: 'Timeline'
+  oom-score-adj: 0
+  wait-for-config: No
+  failure-action: 'wait=10'

@@ -1,0 +1,43 @@
+# Containerlab runtime artifacts
+clab-*/
+.clab*/
+*.clab.yaml
+*.clab.yml.bak
+
+# Binaries & build artifacts
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Python & virtualenv
+.venv/
+venv/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Wheels
+wheels/
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Keys & Certificates
+*.pub
+*.key
+*.pem
+id_*
+*.crt
