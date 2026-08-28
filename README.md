@@ -76,13 +76,34 @@ timeline --filter "interface ethernet-1/1"
 
 ## Installation & Building
 
-### Option 1: Download Pre-compiled Binary
-You can download the latest pre-compiled static Linux binary from the [GitHub Releases](https://github.com/andywhitaker/srl-timeline/releases/latest) page and copy it to `/usr/local/bin/timeline` on your switch:
+### Option 1: Download & Copy Pre-compiled Binary
 
-```bash
-chmod +x timeline
-sudo mv timeline /usr/local/bin/timeline
-```
+1. **Download the binary**:
+   Download the latest static Linux binary (`timeline`) from the [GitHub Releases](https://github.com/andywhitaker/srl-timeline/releases/latest) page on your local workstation.
+
+2. **Copy the binary to the switch via SCP**:
+   From your local machine, copy the binary to `/tmp` on the SR Linux switch:
+   ```bash
+   scp timeline admin@<switch-ip>:/tmp/timeline
+   ```
+
+3. **Install and set executable permissions on the switch**:
+   - **From the SR Linux CLI**:
+     ```text
+     --{ running }--[  ]--
+     A:srl-timeline# bash sudo mv /tmp/timeline /usr/local/bin/timeline
+     A:srl-timeline# bash sudo chmod +x /usr/local/bin/timeline
+     ```
+   - **From the Linux Bash Shell** (if logged into bash directly):
+     ```bash
+     sudo mv /tmp/timeline /usr/local/bin/timeline
+     sudo chmod +x /usr/local/bin/timeline
+     ```
+
+> **Tip**: If your SR Linux switch has direct outbound internet access, you can download and install it in a single command on the switch:
+> ```bash
+> sudo curl -sL https://github.com/andywhitaker/srl-timeline/releases/latest/download/timeline -o /usr/local/bin/timeline && sudo chmod +x /usr/local/bin/timeline
+> ```
 
 ### Option 2: Build from Source with Go
 `timeline` is written in pure Go and compiles to a single static binary with no external runtime dependencies:
@@ -94,6 +115,9 @@ cd srl-timeline
 
 # Compile static binary
 CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/timeline .
+
+# Copy to switch via SCP
+scp bin/timeline admin@<switch-ip>:/tmp/timeline
 ```
 
 ---
