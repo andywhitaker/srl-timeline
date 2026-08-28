@@ -190,7 +190,7 @@ func fetchLiveConfigCmd(client *srlclient.SRLClient) tea.Cmd {
 
 // Init starts the Bubble Tea loop and background daemon if not already running.
 func (m AppModel) Init() tea.Cmd {
-	if !daemon.IsDaemonRunning(daemon.DefaultPIDFile) {
+	if !daemon.IsDaemonRunning(daemon.DefaultPIDFile) && !daemon.IsDaemonRunning(daemon.FallbackPIDFile) {
 		m.Daemon.Start()
 	}
 
@@ -619,6 +619,12 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if timelineWidth < 35 {
 		timelineWidth = 35
 	}
+	if timelineWidth > m.Width-42 {
+		timelineWidth = m.Width - 42
+	}
+	if timelineWidth < 20 {
+		timelineWidth = 20
+	}
 
 	// 1. Click on Filter Bar (Y == 2 or Y == 3)
 	if (msg.Y == 2 || msg.Y == 3) && msg.Type == tea.MouseLeft {
@@ -643,7 +649,20 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// 2. Click on Top Tab Bar (Y == 4, X > timelineWidth)
 	if msg.Y == 4 && msg.X > timelineWidth && msg.Type == tea.MouseLeft {
 		tabOffset := msg.X - timelineWidth
-		if tabOffset >= 1 && tabOffset <= 22 {
+		detailOuterWidth := m.Width - timelineWidth - 1
+		diffTitle := "🔍 Diff View [d]"
+		configTitle := "📄 Full Config [c]"
+		blameTitle := "🕵️ Blame View [b]"
+		if detailOuterWidth < 55 {
+			diffTitle = "[d] Diff"
+			configTitle = "[c] Config"
+			blameTitle = "[b] Blame"
+		}
+		tabDiffW := lipgloss.Width(StyleTabActive.Render(diffTitle))
+		tabConfigW := lipgloss.Width(StyleTabActive.Render(configTitle))
+		tabBlameW := lipgloss.Width(StyleTabActive.Render(blameTitle))
+
+		if tabOffset >= 0 && tabOffset <= tabDiffW {
 			m.ActiveTab = TabDiff
 			m.FocusedPane = PaneDetail
 			m.TimelineView.IsFocused = false
@@ -652,7 +671,7 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.BlameView.IsFocused = true
 			m.updateActiveTabContent()
 			return m, nil
-		} else if tabOffset >= 23 && tabOffset <= 46 {
+		} else if tabOffset > tabDiffW && tabOffset <= tabDiffW+tabConfigW {
 			m.ActiveTab = TabConfig
 			m.FocusedPane = PaneDetail
 			m.TimelineView.IsFocused = false
@@ -661,7 +680,7 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.BlameView.IsFocused = true
 			m.updateActiveTabContent()
 			return m, nil
-		} else if tabOffset >= 47 && tabOffset <= 70 {
+		} else if tabOffset > tabDiffW+tabConfigW && tabOffset <= tabDiffW+tabConfigW+tabBlameW {
 			m.ActiveTab = TabBlame
 			m.FocusedPane = PaneDetail
 			m.TimelineView.IsFocused = false
@@ -953,19 +972,32 @@ func (m *AppModel) resizeLayout(width, height int) {
 		detailPaneHeight = 4
 	}
 
-	timelineWidth := (width * 38) / 100
-	if timelineWidth < 35 {
-		timelineWidth = 35
+	timelineOuterWidth := (width * 38) / 100
+	if timelineOuterWidth < 35 {
+		timelineOuterWidth = 35
 	}
-	detailWidth := width - timelineWidth - 2
-	if detailWidth < 40 {
-		detailWidth = 40
+	if timelineOuterWidth > width-42 {
+		timelineOuterWidth = width - 42
+	}
+	if timelineOuterWidth < 20 {
+		timelineOuterWidth = 20
 	}
 
-	m.TimelineView.SetSize(timelineWidth, timelinePaneHeight)
-	m.DiffView.SetSize(detailWidth, detailPaneHeight)
-	m.ConfigView.SetSize(detailWidth, detailPaneHeight)
-	m.BlameView.SetSize(detailWidth, detailPaneHeight)
+	// 1 character gap between left timeline pane and right detail pane
+	detailOuterWidth := width - timelineOuterWidth - 1
+	if detailOuterWidth < 20 {
+		detailOuterWidth = 20
+	}
+
+	// Inner content widths for borderStyle.Width(w)
+	// Since border adds 1 char left + 1 char right (2 total), Style.Width(outerWidth - 2) renders exactly outerWidth
+	timelineInnerWidth := timelineOuterWidth - 2
+	detailInnerWidth := detailOuterWidth - 2
+
+	m.TimelineView.SetSize(timelineInnerWidth, timelinePaneHeight)
+	m.DiffView.SetSize(detailInnerWidth, detailPaneHeight)
+	m.ConfigView.SetSize(detailInnerWidth, detailPaneHeight)
+	m.BlameView.SetSize(detailInnerWidth, detailPaneHeight)
 
 	m.refreshTimeline()
 }
@@ -1036,17 +1068,38 @@ func (m AppModel) View() string {
 	filterBar := m.FilterBar.View()
 
 	// 3. Tab Navigation Bar
-	tabDiff := StyleTabInactive.Render("🔍 Diff View [d]")
+	timelineOuterWidth := (m.Width * 38) / 100
+	if timelineOuterWidth < 35 {
+		timelineOuterWidth = 35
+	}
+	if timelineOuterWidth > m.Width-42 {
+		timelineOuterWidth = m.Width - 42
+	}
+	if timelineOuterWidth < 20 {
+		timelineOuterWidth = 20
+	}
+	detailOuterWidth := m.Width - timelineOuterWidth - 1
+
+	diffTitle := "🔍 Diff View [d]"
+	configTitle := "📄 Full Config [c]"
+	blameTitle := "🕵️ Blame View [b]"
+	if detailOuterWidth < 55 {
+		diffTitle = "[d] Diff"
+		configTitle = "[c] Config"
+		blameTitle = "[b] Blame"
+	}
+
+	tabDiff := StyleTabInactive.Render(diffTitle)
 	if m.ActiveTab == TabDiff {
-		tabDiff = StyleTabActive.Render("🔍 Diff View [d]")
+		tabDiff = StyleTabActive.Render(diffTitle)
 	}
-	tabConfig := StyleTabInactive.Render("📄 Full Config [c]")
+	tabConfig := StyleTabInactive.Render(configTitle)
 	if m.ActiveTab == TabConfig {
-		tabConfig = StyleTabActive.Render("📄 Full Config [c]")
+		tabConfig = StyleTabActive.Render(configTitle)
 	}
-	tabBlame := StyleTabInactive.Render("🕵️ Blame View [b]")
+	tabBlame := StyleTabInactive.Render(blameTitle)
 	if m.ActiveTab == TabBlame {
-		tabBlame = StyleTabActive.Render("🕵️ Blame View [b]")
+		tabBlame = StyleTabActive.Render(blameTitle)
 	}
 
 	tabBar := lipgloss.JoinHorizontal(lipgloss.Center, tabDiff, tabConfig, tabBlame)

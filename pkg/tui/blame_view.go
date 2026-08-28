@@ -30,7 +30,7 @@ func NewBlameViewModel(width, height int) BlameViewModel {
 	if vpHeight < 1 {
 		vpHeight = 1
 	}
-	vp := viewport.New(width-4, vpHeight)
+	vp := viewport.New(width, vpHeight)
 	return BlameViewModel{
 		Entries:   []models.BlameEntry{},
 		Viewport:  vp,
@@ -51,7 +51,7 @@ func (m *BlameViewModel) SetBlame(entries []models.BlameEntry, stats blame.Contr
 func (m *BlameViewModel) SetSize(width, height int) {
 	m.Width = width
 	m.Height = height
-	m.Viewport.Width = width - 4
+	m.Viewport.Width = width
 	vpHeight := height - 3
 	if vpHeight < 1 {
 		vpHeight = 1
@@ -76,8 +76,8 @@ func (m *BlameViewModel) UpdateContent() {
 	sb.WriteString("\n")
 
 	maxContentW := m.Width - 38
-	if maxContentW < 30 {
-		maxContentW = 30
+	if maxContentW < 20 {
+		maxContentW = 20
 	}
 
 	for _, e := range m.Entries {
@@ -191,7 +191,7 @@ func (m BlameViewModel) View() string {
 	controlsBar := lipgloss.NewStyle().
 		Background(lipgloss.Color("#161b22")).
 		Padding(0, 1).
-		Width(m.Width - 4).
+		Width(m.Width - 2).
 		Render(scrollBadge)
 
 	return borderStyle.

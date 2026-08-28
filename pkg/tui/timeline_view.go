@@ -86,7 +86,7 @@ func (m *TimelineViewModel) ensureVisible() {
 func (m *TimelineViewModel) SetSize(width, height int) {
 	m.Width = width
 	m.Height = height
-	m.Viewport.Width = width - 2
+	m.Viewport.Width = width
 	vpHeight := height - 1
 	if vpHeight < 1 {
 		vpHeight = 1
@@ -187,7 +187,7 @@ func (m *TimelineViewModel) UpdateViewportContent() {
 		// Combine lines
 		rowBlock := fmt.Sprintf("%s\n%s\n%s", headerLine, messageLine, spacingLine)
 		if isSelected {
-			rowBlock = StyleTimelineSelectedRow.Width(m.Width - 4).Render(rowBlock)
+			rowBlock = StyleTimelineSelectedRow.Width(m.Width).Render(rowBlock)
 		}
 
 		sb.WriteString(rowBlock)

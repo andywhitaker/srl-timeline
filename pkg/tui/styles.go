@@ -112,13 +112,13 @@ var (
 			Bold(true).
 			Foreground(lipgloss.Color("#ffffff")).
 			Background(ColorPrimary).
-			Padding(0, 2).
+			Padding(0, 1).
 			MarginRight(1)
 
 	StyleTabInactive = lipgloss.NewStyle().
 				Foreground(ColorMuted).
 				Background(lipgloss.Color("#21262d")).
-				Padding(0, 2).
+				Padding(0, 1).
 				MarginRight(1)
 
 	// Visual Timeline Graph Styles

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -18,7 +19,8 @@ import (
 
 const (
 	DefaultPIDFile   = "/var/run/timeline_daemon.pid"
-	DefaultLockFile  = "/var/run/timeline_record.lock"
+	FallbackPIDFile  = "/tmp/timeline_daemon.pid"
+	DefaultLockFile  = "/tmp/timeline_record.lock"
 	FallbackLockFile = "/tmp/timeline_record.lock"
 )
 
@@ -130,12 +132,13 @@ func (d *TimelineDaemon) monitorLoop() {
 
 func (d *TimelineDaemon) checkAndRecordChange() {
 	lockPath := DefaultLockFile
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0666)
 	if err != nil {
 		lockPath = FallbackLockFile
-		lockFile, err = os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+		lockFile, err = os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0666)
 	}
 	if err == nil {
+		_ = os.Chmod(lockPath, 0666)
 		defer lockFile.Close()
 		if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 			// Another daemon or TUI instance is actively checking/recording
@@ -208,14 +211,19 @@ func ManageDaemonProcess(action string) error {
 
 	switch action {
 	case "start":
-		if IsDaemonRunning(pidFile) {
+		if IsDaemonRunning(DefaultPIDFile) || IsDaemonRunning(FallbackPIDFile) {
 			fmt.Println("Timeline daemon is already running.")
 			return nil
 		}
 		d := NewTimelineDaemon(nil, nil)
 		d.Start()
 		pid := os.Getpid()
-		_ = os.WriteFile(pidFile, []byte(strconv.Itoa(pid)), 0644)
+		if err := os.WriteFile(pidFile, []byte(strconv.Itoa(pid)), 0666); err != nil {
+			pidFile = FallbackPIDFile
+			_ = os.WriteFile(pidFile, []byte(strconv.Itoa(pid)), 0666)
+		} else {
+			_ = os.Chmod(pidFile, 0666)
+		}
 		fmt.Printf("Started Timeline daemon (PID %d)\n", pid)
 
 		// Wait for signal
@@ -228,7 +236,12 @@ func ManageDaemonProcess(action string) error {
 		return nil
 
 	case "stop":
-		data, err := os.ReadFile(pidFile)
+		data, err := os.ReadFile(DefaultPIDFile)
+		targetPIDFile := DefaultPIDFile
+		if err != nil {
+			data, err = os.ReadFile(FallbackPIDFile)
+			targetPIDFile = FallbackPIDFile
+		}
 		if err != nil {
 			fmt.Println("Timeline daemon is not running.")
 			return nil
@@ -241,12 +254,15 @@ func ManageDaemonProcess(action string) error {
 				fmt.Printf("Stopped Timeline daemon (PID %d)\n", pid)
 			}
 		}
-		_ = os.Remove(pidFile)
+		_ = os.Remove(targetPIDFile)
 		return nil
 
 	case "status":
-		if IsDaemonRunning(pidFile) {
-			data, _ := os.ReadFile(pidFile)
+		if IsDaemonRunning(DefaultPIDFile) {
+			data, _ := os.ReadFile(DefaultPIDFile)
+			fmt.Printf("Status: RUNNING (PID %s)\n", strings.TrimSpace(string(data)))
+		} else if IsDaemonRunning(FallbackPIDFile) {
+			data, _ := os.ReadFile(FallbackPIDFile)
 			fmt.Printf("Status: RUNNING (PID %s)\n", strings.TrimSpace(string(data)))
 		} else {
 			fmt.Println("Status: STOPPED")
@@ -272,5 +288,12 @@ func IsDaemonRunning(pidFile string) bool {
 	if err != nil {
 		return false
 	}
-	return proc.Signal(syscall.Signal(0)) == nil
+	err = proc.Signal(syscall.Signal(0))
+	if err == nil || errors.Is(err, syscall.EPERM) {
+		return true
+	}
+	if _, statErr := os.Stat(fmt.Sprintf("/proc/%d", pid)); statErr == nil {
+		return true
+	}
+	return false
 }

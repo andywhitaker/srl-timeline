@@ -371,6 +371,9 @@ func TestExactScreenHeightFit(t *testing.T) {
 			v := app.View()
 			lines := strings.Split(v, "\n")
 			if len(lines) != h {
+				for i, l := range lines {
+					t.Logf("L%d: %s", i, l)
+				}
 				t.Fatalf("expected exactly %d lines in TabDiff (unfiltered, width %d), got %d", h, w, len(lines))
 			}
 
@@ -670,5 +673,102 @@ func TestFilterClearingMechanisms(t *testing.T) {
 	app = resModel.(AppModel)
 	if app.FilterBar.Value() != "" {
 		t.Fatalf("expected empty filter after mouse click on clear button")
+	}
+}
+
+func TestScreenWidthNotExceeded(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "tui_width_test_*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	repoDir := filepath.Join(tempDir, "repo")
+	backend := gitbackend.NewGitBackend(repoDir)
+
+	cfg := map[string]interface{}{
+		"system": map[string]interface{}{
+			"name": map[string]interface{}{"host-name": "srl-width-test"},
+		},
+		"interface": []interface{}{
+			map[string]interface{}{
+				"name":        "ethernet-1/1",
+				"description": "This is a very long configuration statement intended to test wrapping behavior across lines",
+			},
+		},
+	}
+	_, _, _ = backend.RecordConfigChange(cfg, "admin", "1", "", time.Now().UTC(), "Initial baseline", nil)
+
+	model := NewAppModel(backend, nil, "")
+
+	for _, w := range []int{80, 100, 120, 140} {
+		for _, h := range []int{24, 30, 40} {
+			resModel, _ := model.Update(tea.WindowSizeMsg{Width: w, Height: h})
+			app := resModel.(AppModel)
+
+			for _, tabKey := range []rune{'d', 'c', 'b'} {
+				resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{tabKey}})
+				app = resModel.(AppModel)
+
+				viewStr := app.View()
+				lines := strings.Split(viewStr, "\n")
+				for lineIdx, line := range lines {
+					lineW := lipgloss.Width(line)
+					if lineW > w {
+						t.Fatalf("Width %d, Height %d, Tab %c: line %d exceeded screen width (line width %d):\n%s",
+							w, h, tabKey, lineIdx, lineW, line)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestDiffViewLineWrappingColors(t *testing.T) {
+	diffRes := models.SemanticDiffResult{
+		HasChanges: true,
+		UnifiedDiffLines: []string{
+			"--- previous_config",
+			"+++ current_config",
+			"@@ -1,5 +1,5 @@",
+			"+ set / interface ethernet-1/1 description \"A very long description that is expected to wrap onto multiple lines in a narrow viewport\"",
+			"- set / interface ethernet-1/1 description \"Old long description that is also expected to wrap onto multiple lines in a narrow viewport\"",
+		},
+		CLIDiffLines: []string{
+			"+ set / interface ethernet-1/1 description \"A very long description that is expected to wrap onto multiple lines in a narrow viewport\"",
+			"- set / interface ethernet-1/1 description \"Old long description that is also expected to wrap onto multiple lines in a narrow viewport\"",
+		},
+	}
+
+	dv := NewDiffViewModel(40, 20)
+	dv.SetDiff(diffRes)
+
+	// Unified mode
+	dv.DiffMode = "unified"
+	dv.UpdateContent()
+	content := dv.Viewport.View()
+	lines := strings.Split(content, "\n")
+
+	// Verify that lines containing the addition text have green ANSI codes (\x1b[)
+	for _, l := range lines {
+		if strings.Contains(l, "A very long") || strings.Contains(l, "multiple lines") {
+			if !strings.Contains(l, "\x1b[") {
+				t.Fatalf("expected wrapped line portion to retain ANSI escape codes, got: %q", l)
+			}
+		}
+	}
+
+	// CLI mode
+	dv.DiffMode = "cli"
+	dv.UpdateContent()
+	content = dv.Viewport.View()
+	lines = strings.Split(content, "\n")
+
+	for _, l := range lines {
+		if strings.Contains(l, "A very long") || strings.Contains(l, "multiple lines") {
+			if !strings.Contains(l, "\x1b[") {
+				t.Fatalf("expected wrapped CLI line portion to retain ANSI escape codes, got: %q", l)
+			}
+		}
 	}
 }

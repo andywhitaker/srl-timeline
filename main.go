@@ -23,7 +23,7 @@ import (
 )
 
 // Version is the current release version of srl-timeline.
-const Version = "0.0.2"
+const Version = "0.0.3"
 
 func init() {
 	if os.Getenv("NO_COLOR") == "" {

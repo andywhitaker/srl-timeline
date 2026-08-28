@@ -30,7 +30,7 @@ func NewConfigViewModel(width, height int) ConfigViewModel {
 	if vpHeight < 1 {
 		vpHeight = 1
 	}
-	vp := viewport.New(width-4, vpHeight)
+	vp := viewport.New(width, vpHeight)
 	return ConfigViewModel{
 		ConfigData: make(map[string]interface{}),
 		FormatMode: "cli",
@@ -52,7 +52,7 @@ func (m *ConfigViewModel) SetConfig(cfg map[string]interface{}, filterPath strin
 func (m *ConfigViewModel) SetSize(width, height int) {
 	m.Width = width
 	m.Height = height
-	m.Viewport.Width = width - 4
+	m.Viewport.Width = width
 	vpHeight := height - 3
 	if vpHeight < 1 {
 		vpHeight = 1
@@ -70,6 +70,13 @@ func (m *ConfigViewModel) UpdateContent() {
 	}
 
 	var sb strings.Builder
+	wrapW := m.Viewport.Width
+	if wrapW <= 0 {
+		wrapW = m.Width
+	}
+	if wrapW < 20 {
+		wrapW = 20
+	}
 
 	if m.FormatMode == "cli" {
 		lines := normalizer.JSONToFlatCLI(m.ConfigData, "")
@@ -80,17 +87,23 @@ func (m *ConfigViewModel) UpdateContent() {
 			m.Viewport.SetContent(lipgloss.NewStyle().Foreground(ColorWarning).Padding(1, 2).Render(fmt.Sprintf("No CLI configuration statements match filter '%s'", m.FilterPath)))
 			return
 		}
+		styleIface := lipgloss.NewStyle().Foreground(lipgloss.Color("#79c0ff")).Width(wrapW)
+		styleNet := lipgloss.NewStyle().Foreground(lipgloss.Color("#d2a8ff")).Width(wrapW)
+		styleSys := lipgloss.NewStyle().Foreground(lipgloss.Color("#56d364")).Width(wrapW)
+		styleACL := lipgloss.NewStyle().Foreground(lipgloss.Color("#ffa657")).Width(wrapW)
+		styleDef := lipgloss.NewStyle().Foreground(lipgloss.Color("#e6edf3")).Width(wrapW)
+
 		for _, l := range lines {
 			if strings.HasPrefix(l, "set / interface") {
-				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#79c0ff")).Render(l))
+				sb.WriteString(styleIface.Render(l))
 			} else if strings.HasPrefix(l, "set / network-instance") {
-				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#d2a8ff")).Render(l))
+				sb.WriteString(styleNet.Render(l))
 			} else if strings.HasPrefix(l, "set / system") {
-				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#56d364")).Render(l))
+				sb.WriteString(styleSys.Render(l))
 			} else if strings.HasPrefix(l, "set / acl") {
-				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#ffa657")).Render(l))
+				sb.WriteString(styleACL.Render(l))
 			} else {
-				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#e6edf3")).Render(l))
+				sb.WriteString(styleDef.Render(l))
 			}
 			sb.WriteString("\n")
 		}
@@ -105,14 +118,17 @@ func (m *ConfigViewModel) UpdateContent() {
 		}
 		jsonStr, _ := normalizer.CanonicalJSONString(data, 2)
 		lines := strings.Split(jsonStr, "\n")
+		styleKey := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#79c0ff"))
+		styleVal := lipgloss.NewStyle().Foreground(lipgloss.Color("#a5d6ff"))
+		stylePlain := lipgloss.NewStyle().Foreground(lipgloss.Color("#e6edf3")).Width(wrapW)
+		styleLineWrap := lipgloss.NewStyle().Width(wrapW)
+
 		for _, l := range lines {
 			if strings.Contains(l, ":") {
 				parts := strings.SplitN(l, ":", 2)
-				sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#79c0ff")).Render(parts[0]))
-				sb.WriteString(":")
-				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#a5d6ff")).Render(parts[1]))
+				sb.WriteString(styleLineWrap.Render(styleKey.Render(parts[0]) + ":" + styleVal.Render(parts[1])))
 			} else {
-				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#e6edf3")).Render(l))
+				sb.WriteString(stylePlain.Render(l))
 			}
 			sb.WriteString("\n")
 		}
@@ -121,9 +137,6 @@ func (m *ConfigViewModel) UpdateContent() {
 	sb.WriteString("\n" + lipgloss.NewStyle().Foreground(ColorMuted).Italic(true).Render("─── End of Configuration (All statements loaded) ───") + "\n")
 
 	content := sb.String()
-	if m.Viewport.Width > 0 {
-		content = lipgloss.NewStyle().Width(m.Viewport.Width).Render(content)
-	}
 
 	if content == m.lastRendered {
 		return
@@ -189,7 +202,7 @@ func (m ConfigViewModel) View() string {
 	controlsBar := lipgloss.NewStyle().
 		Background(lipgloss.Color("#161b22")).
 		Padding(0, 1).
-		Width(m.Width - 4).
+		Width(m.Width - 2).
 		Render(controls)
 
 	borderStyle := StyleInactiveBorder

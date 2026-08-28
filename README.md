@@ -2,7 +2,39 @@
 
 A configuration timeline and version history tool for Nokia SR Linux using Git.
 
-`timeline` automatically tracks configuration changes on Nokia SR Linux switches into an on-box Git repository. It provides an interactive Terminal User Interface (TUI) and command-line tools to view historical commits, inspect semantic diffs, trace line attribution, restore configurations, and synchronize with remote Git repositories.
+`timeline` automatically tracks configuration changes on Nokia SR Linux switches into an on-box Git repository. It provides an interactive Terminal User Interface (TUI) as the primary way to interact with the switch's history, along with command-line tools to view historical commits, inspect semantic diffs, trace line attribution, restore configurations, and synchronize with remote Git repositories.
+
+![Timeline Image](images/timeline-image.png)
+
+---
+
+## Running the Timeline TUI
+
+The primary way to interact with `timeline` is through the visual **Terminal User Interface (TUI)** directly on the SR Linux device.
+
+### From the SR Linux CLI
+You can launch the TUI directly from the standard SR Linux CLI prompt using the `bash` command:
+
+```text
+--{ running }--[  ]--
+A:srl-timeline# bash timeline
+```
+
+You can also launch it pre-filtered to a specific subsystem or interface:
+```text
+A:srl-timeline# bash timeline --filter "interface ethernet-1/1"
+```
+
+### From the Linux Bash Shell
+If you log into the underlying Linux bash shell on the switch (or connect via SSH), simply run `timeline`:
+
+```bash
+# Launch interactive TUI
+timeline
+
+# Launch TUI pre-filtered to a specific path
+timeline --filter "interface ethernet-1/1"
+```
 
 ---
 
@@ -15,6 +47,30 @@ A configuration timeline and version history tool for Nokia SR Linux using Git.
 - **Configuration Blame**: Line-by-line attribution showing who modified each line or block of configuration and when.
 - **Remote Git Synchronization**: Push configuration history to external Git repositories (GitHub, GitLab, etc.) with automated background push on commit.
 - **Configuration Export**: Export any historical commit as SR Linux startup JSON (`config.json`) or flat CLI scripts.
+
+---
+
+## TUI Keyboard Shortcuts
+
+| Shortcut | Action |
+|---|---|
+| <kbd>j</kbd> / <kbd>↓</kbd> | Next commit in timeline |
+| <kbd>k</kbd> / <kbd>↑</kbd> | Previous commit in timeline |
+| <kbd>Tab</kbd> | Switch focus between Timeline pane and Details pane |
+| <kbd>d</kbd> | Switch to **Diff View** |
+| <kbd>c</kbd> | Switch to **Full Config View** |
+| <kbd>b</kbd> | Switch to **Blame View** |
+| <kbd>[</kbd> / <kbd>]</kbd> or <kbd>t</kbd> | Cycle through views (Diff $\rightarrow$ Config $\rightarrow$ Blame) |
+| <kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd> | Select sub-formats (Unified, Path Changes, Flat CLI in Diff; CLI, JSON in Config) |
+| <kbd>4</kbd> or <kbd>v</kbd> | Toggle **Live Compare Mode** (Revision vs Live Running Config) |
+| <kbd>/</kbd> | Focus search / path filter bar |
+| <kbd>Esc</kbd> | Clear filter / close modal |
+| <kbd>r</kbd> | Open **Restore Modal** (Full configuration rollback) |
+| <kbd>p</kbd> | Open **Cherry-Pick Modal** (Interactive subtree restore) |
+| <kbd>e</kbd> | Open **Export Modal** (Save to file or startup config) |
+| <kbd>g</kbd> | Open **Remote Git Settings Modal** |
+| <kbd>?</kbd> | Display Help dialog |
+| <kbd>q</kbd> | Quit application |
 
 ---
 
@@ -82,41 +138,11 @@ Because minimal SR Linux container images do not include `git` by default, you c
 
 ---
 
-## TUI Keyboard Shortcuts
+## Command-Line Interface (CLI Commands)
 
-| Shortcut | Action |
-|---|---|
-| <kbd>j</kbd> / <kbd>↓</kbd> | Next commit in timeline |
-| <kbd>k</kbd> / <kbd>↑</kbd> | Previous commit in timeline |
-| <kbd>Tab</kbd> | Switch focus between Timeline pane and Details pane |
-| <kbd>d</kbd> | Switch to **Diff View** |
-| <kbd>c</kbd> | Switch to **Full Config View** |
-| <kbd>b</kbd> | Switch to **Blame View** |
-| <kbd>[</kbd> / <kbd>]</kbd> or <kbd>t</kbd> | Cycle through views (Diff $\rightarrow$ Config $\rightarrow$ Blame) |
-| <kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd> | Select sub-formats (Unified, Path Changes, Flat CLI in Diff; CLI, JSON in Config) |
-| <kbd>4</kbd> or <kbd>v</kbd> | Toggle **Live Compare Mode** (Revision vs Live Running Config) |
-| <kbd>/</kbd> | Focus search / path filter bar |
-| <kbd>Esc</kbd> | Clear filter / close modal |
-| <kbd>r</kbd> | Open **Restore Modal** (Full configuration rollback) |
-| <kbd>p</kbd> | Open **Cherry-Pick Modal** (Interactive subtree restore) |
-| <kbd>e</kbd> | Open **Export Modal** (Save to file or startup config) |
-| <kbd>g</kbd> | Open **Remote Git Settings Modal** |
-| <kbd>?</kbd> | Display Help dialog |
-| <kbd>q</kbd> | Quit application |
-
----
-
-## CLI Usage
-
-Run `timeline` from the bash shell or inside `sr_cli`:
+In addition to the interactive TUI, `timeline` provides subcommands for automation, scripting, CI/CD pipelines, or quick queries from the shell:
 
 ```bash
-# Launch interactive visual TUI
-timeline
-
-# Launch TUI filtered to a specific subtree
-timeline --filter "interface ethernet-1/1"
-
 # View commit history
 timeline log --limit 20
 timeline log --filter bgp
@@ -148,6 +174,11 @@ timeline remote show
 timeline remote key
 timeline remote set git@github.com:org/srl-configs.git --auto-push
 timeline remote push
+
+# Background recorder daemon management
+timeline daemon status
+timeline daemon start
+timeline daemon stop
 ```
 
 ---

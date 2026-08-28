@@ -63,12 +63,16 @@ func determineRepoDir() string {
 	if env := os.Getenv("TIMELINE_REPO_DIR"); env != "" {
 		return env
 	}
-	if err := os.MkdirAll("/etc/opt/srlinux/timeline", 0755); err == nil {
-		testFile := "/etc/opt/srlinux/timeline/.write_test"
-		if err := os.WriteFile(testFile, []byte("test"), 0644); err == nil {
-			_ = os.Remove(testFile)
-			return DefaultRepoDir
-		}
+	// On SR Linux, configuration and application state reside under /etc/opt/srlinux.
+	// If /etc/opt/srlinux exists or can be created, always use DefaultRepoDir.
+	if _, err := os.Stat("/etc/opt/srlinux"); err == nil {
+		_ = os.MkdirAll("/etc/opt/srlinux/timeline", 0777)
+		_ = os.Chmod("/etc/opt/srlinux/timeline", 0777)
+		return DefaultRepoDir
+	}
+	if err := os.MkdirAll("/etc/opt/srlinux/timeline", 0777); err == nil {
+		_ = os.Chmod("/etc/opt/srlinux/timeline", 0777)
+		return DefaultRepoDir
 	}
 	return FallbackRepoDir
 }
@@ -182,14 +186,21 @@ func (b *GitBackend) getSSHCommand() string {
 }
 
 func (b *GitBackend) ensureRepo() {
-	_ = os.MkdirAll(b.RepoDir, 0755)
+	_ = os.MkdirAll(b.RepoDir, 0777)
+	_ = os.Chmod(b.RepoDir, 0777)
+	if parent := filepath.Dir(b.RepoDir); parent != "" && parent != "/" {
+		_ = os.Chmod(parent, 0777)
+	}
 	gitDir := filepath.Join(b.RepoDir, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
-		cmd := exec.Command("git", "-c", "safe.directory=*", "init", "-b", "main", b.RepoDir)
+		cmd := exec.Command("git", "-c", "safe.directory=*", "init", "--shared=all", "-b", "main", b.RepoDir)
 		_ = cmd.Run()
 		_, _ = b.runGit([]string{"config", "user.name", "SR Linux Timeline"}, nil)
 		_, _ = b.runGit([]string{"config", "user.email", "timeline@srl-timeline"}, nil)
 		_, _ = b.runGit([]string{"config", "commit.gpgSign", "false"}, nil)
+		_, _ = b.runGit([]string{"config", "core.sharedRepository", "all"}, nil)
+	} else {
+		_, _ = b.runGit([]string{"config", "core.sharedRepository", "all"}, nil)
 	}
 }
 
@@ -273,8 +284,14 @@ func (b *GitBackend) RecordConfigChange(
 	}
 
 	// Write files
-	_ = os.WriteFile(filepath.Join(b.RepoDir, "config.json"), []byte(canonicalJSON), 0644)
-	_ = os.WriteFile(filepath.Join(b.RepoDir, "config.cli"), []byte(cliText), 0644)
+	configFile := filepath.Join(b.RepoDir, "config.json")
+	cliFile := filepath.Join(b.RepoDir, "config.cli")
+	metaFile := filepath.Join(b.RepoDir, "metadata.json")
+
+	_ = os.WriteFile(configFile, []byte(canonicalJSON), 0666)
+	_ = os.Chmod(configFile, 0666)
+	_ = os.WriteFile(cliFile, []byte(cliText), 0666)
+	_ = os.Chmod(cliFile, 0666)
 
 	meta := make(map[string]interface{})
 	if metadata != nil {
@@ -289,7 +306,8 @@ func (b *GitBackend) RecordConfigChange(
 	meta["diff_summary"] = diffRes.StatBadge()
 
 	metaJSON, _ := json.MarshalIndent(meta, "", "  ")
-	_ = os.WriteFile(filepath.Join(b.RepoDir, "metadata.json"), metaJSON, 0644)
+	_ = os.WriteFile(metaFile, metaJSON, 0666)
+	_ = os.Chmod(metaFile, 0666)
 
 	// Stage
 	_, err = b.runGit([]string{"add", "config.json", "config.cli", "metadata.json"}, nil)
@@ -644,7 +662,8 @@ func (b *GitBackend) SaveRemoteConfig(cfg models.RemoteRepoConfig) error {
 	if err != nil {
 		return err
 	}
-	_ = os.WriteFile(b.RemoteConfigFile, data, 0644)
+	_ = os.WriteFile(b.RemoteConfigFile, data, 0666)
+	_ = os.Chmod(b.RemoteConfigFile, 0666)
 
 	// Configure git remote
 	if cfg.URL != "" {

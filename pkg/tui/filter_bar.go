@@ -143,9 +143,9 @@ func (m FilterBarModel) View() string {
 	leftContent := m.TextInput.View()
 	leftLen := lipgloss.Width(leftContent)
 
-	availSpace := m.Width - leftLen - rightLen - 4
-	if availSpace < 1 {
-		availSpace = 1
+	availSpace := (m.Width - 2) - leftLen - rightLen
+	if availSpace < 0 {
+		availSpace = 0
 	}
 	spacer := strings.Repeat(" ", availSpace)
 

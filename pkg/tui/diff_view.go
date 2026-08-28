@@ -28,7 +28,7 @@ func NewDiffViewModel(width, height int) DiffViewModel {
 	if vpHeight < 1 {
 		vpHeight = 1
 	}
-	vp := viewport.New(width-4, vpHeight)
+	vp := viewport.New(width, vpHeight)
 	return DiffViewModel{
 		DiffMode:  "unified",
 		Viewport:  vp,
@@ -48,7 +48,7 @@ func (m *DiffViewModel) SetDiff(res models.SemanticDiffResult) {
 func (m *DiffViewModel) SetSize(width, height int) {
 	m.Width = width
 	m.Height = height
-	m.Viewport.Width = width - 4
+	m.Viewport.Width = width
 	vpHeight := height - 3
 	if vpHeight < 1 {
 		vpHeight = 1
@@ -69,23 +69,36 @@ func (m *DiffViewModel) UpdateContent() {
 	}
 
 	var sb strings.Builder
+	wrapW := m.Viewport.Width
+	if wrapW <= 0 {
+		wrapW = m.Width
+	}
+	if wrapW < 20 {
+		wrapW = 20
+	}
 
 	switch m.DiffMode {
 	case "unified":
 		if len(m.DiffResult.UnifiedDiffLines) <= 2 {
 			sb.WriteString(lipgloss.NewStyle().Foreground(ColorWarning).Padding(1, 2).Render("No unified JSON differences found for this filter. Check [2] Path or [3] CLI diff."))
 		} else {
+			styleHeader := lipgloss.NewStyle().Bold(true).Foreground(ColorMuted).Width(wrapW)
+			styleHunk := lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Width(wrapW)
+			styleAdd := lipgloss.NewStyle().Foreground(ColorSuccess).Width(wrapW)
+			styleDel := lipgloss.NewStyle().Foreground(ColorDanger).Width(wrapW)
+			styleCtx := lipgloss.NewStyle().Foreground(ColorMuted).Width(wrapW)
+
 			for _, l := range m.DiffResult.UnifiedDiffLines {
 				if strings.HasPrefix(l, "+++") || strings.HasPrefix(l, "---") {
-					sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(ColorMuted).Render(l))
+					sb.WriteString(styleHeader.Render(l))
 				} else if strings.HasPrefix(l, "@@") {
-					sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Render(l))
+					sb.WriteString(styleHunk.Render(l))
 				} else if strings.HasPrefix(l, "+") {
-					sb.WriteString(lipgloss.NewStyle().Foreground(ColorSuccess).Render(l))
+					sb.WriteString(styleAdd.Render(l))
 				} else if strings.HasPrefix(l, "-") {
-					sb.WriteString(lipgloss.NewStyle().Foreground(ColorDanger).Render(l))
+					sb.WriteString(styleDel.Render(l))
 				} else {
-					sb.WriteString(lipgloss.NewStyle().Foreground(ColorMuted).Render(l))
+					sb.WriteString(styleCtx.Render(l))
 				}
 				sb.WriteString("\n")
 			}
@@ -97,16 +110,31 @@ func (m *DiffViewModel) UpdateContent() {
 		} else {
 			for _, c := range m.DiffResult.Changes {
 				var badge string
+				var pathStyle lipgloss.Style
 				switch c.DiffType {
 				case models.DiffAdded:
 					badge = lipgloss.NewStyle().Background(ColorSuccess).Foreground(lipgloss.Color("#ffffff")).Bold(true).Render(" ADD ")
+					pathStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorSuccess)
 				case models.DiffModified:
 					badge = lipgloss.NewStyle().Background(ColorWarning).Foreground(lipgloss.Color("#ffffff")).Bold(true).Render(" MOD ")
+					pathStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorText)
 				case models.DiffDeleted:
 					badge = lipgloss.NewStyle().Background(ColorDanger).Foreground(lipgloss.Color("#ffffff")).Bold(true).Render(" DEL ")
+					pathStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorDanger)
 				}
-				pathStr := lipgloss.NewStyle().Bold(true).Foreground(ColorText).Render(c.Path)
-				sb.WriteString(fmt.Sprintf("%s %s\n", badge, pathStr))
+				pathWrapW := wrapW - 7
+				if pathWrapW > 10 {
+					pathStyle = pathStyle.Width(pathWrapW)
+				}
+				pathStr := pathStyle.Render(c.Path)
+				lines := strings.Split(pathStr, "\n")
+				for idx, pLine := range lines {
+					if idx == 0 {
+						sb.WriteString(fmt.Sprintf("%s %s\n", badge, pLine))
+					} else {
+						sb.WriteString(fmt.Sprintf("      %s\n", pLine))
+					}
+				}
 			}
 		}
 
@@ -114,13 +142,17 @@ func (m *DiffViewModel) UpdateContent() {
 		if len(m.DiffResult.CLIDiffLines) == 0 {
 			sb.WriteString(lipgloss.NewStyle().Foreground(ColorWarning).Padding(1, 2).Render("No CLI diff statements found for this filter."))
 		} else {
+			styleCLIAdd := lipgloss.NewStyle().Foreground(ColorSuccess).Width(wrapW)
+			styleCLIDel := lipgloss.NewStyle().Foreground(ColorDanger).Width(wrapW)
+			styleCLICtx := lipgloss.NewStyle().Foreground(ColorText).Width(wrapW)
+
 			for _, l := range m.DiffResult.CLIDiffLines {
 				if strings.HasPrefix(l, "+") {
-					sb.WriteString(lipgloss.NewStyle().Foreground(ColorSuccess).Render(l))
+					sb.WriteString(styleCLIAdd.Render(l))
 				} else if strings.HasPrefix(l, "-") {
-					sb.WriteString(lipgloss.NewStyle().Foreground(ColorDanger).Render(l))
+					sb.WriteString(styleCLIDel.Render(l))
 				} else {
-					sb.WriteString(lipgloss.NewStyle().Foreground(ColorText).Render(l))
+					sb.WriteString(styleCLICtx.Render(l))
 				}
 				sb.WriteString("\n")
 			}
@@ -200,7 +232,7 @@ func (m DiffViewModel) View() string {
 	controlsBar := lipgloss.NewStyle().
 		Background(lipgloss.Color("#161b22")).
 		Padding(0, 1).
-		Width(m.Width - 4).
+		Width(m.Width - 2).
 		Render(controls)
 
 	borderStyle := StyleInactiveBorder
