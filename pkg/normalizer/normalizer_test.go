@@ -105,3 +105,72 @@ func TestJSONToFlatCLI(t *testing.T) {
 		t.Fatalf("expected leaf-lists in %v", userLines)
 	}
 }
+
+func TestFormatScalarCLIPreservesColonValues(t *testing.T) {
+	cases := []struct {
+		in   interface{}
+		want string
+	}{
+		{"2001:db8:100::1/64", "2001:db8:100::1/64"},
+		{"00:1a:2b:3c:4d:5e", "00:1a:2b:3c:4d:5e"},
+		{"65001:100", "65001:100"},
+		{"10.0.0.1:100", "10.0.0.1:100"},
+		{"https://10.0.0.1:8443/api", "https://10.0.0.1:8443/api"},
+		{"srl_nokia-network-instance:ip-vrf", "ip-vrf"},
+		{"srl_nokia-common:ipv4-unicast", "ipv4-unicast"},
+		{"Line 1\nLine 2\tTabbed", "\"Line 1\\nLine 2\\tTabbed\""},
+	}
+	for _, tc := range cases {
+		got := FormatScalarCLI(tc.in)
+		if got != tc.want {
+			t.Errorf("FormatScalarCLI(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestJSONToFlatCLIMultiLeafAndMetadata(t *testing.T) {
+	raw := map[string]interface{}{
+		"_preamble": "comment",
+		"network-instance": []interface{}{
+			map[string]interface{}{
+				"_annotate":   "vrf comment",
+				"name":        "default",
+				"description": "Two  Spaces   Preserved",
+				"type":        "srl_nokia-network-instance:default",
+				"static-routes": map[string]interface{}{
+					"route": []interface{}{
+						map[string]interface{}{
+							"prefix":         "2001:db8:100::/48",
+							"admin-state":    "enable",
+							"metric":         10,
+							"next-hop-group": "nhg-v6",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	norm := NormalizeStructure(raw, true).(map[string]interface{})
+	if _, hasPreamble := norm["_preamble"]; hasPreamble {
+		t.Fatalf("expected _preamble to be stripped during NormalizeStructure")
+	}
+
+	lines := JSONToFlatCLI(norm, "")
+	wantLines := []string{
+		"set / network-instance default description \"Two  Spaces   Preserved\"",
+		"set / network-instance default static-routes route 2001:db8:100::/48 admin-state enable",
+		"set / network-instance default static-routes route 2001:db8:100::/48 metric 10",
+		"set / network-instance default static-routes route 2001:db8:100::/48 next-hop-group nhg-v6",
+		"set / network-instance default type default",
+	}
+	if len(lines) != len(wantLines) {
+		t.Fatalf("expected %d CLI lines (one leaf per line), got %d: %v", len(wantLines), len(lines), lines)
+	}
+	for i, w := range wantLines {
+		if lines[i] != w {
+			t.Errorf("line[%d] = %q, want %q", i, lines[i], w)
+		}
+	}
+}
+

@@ -4,6 +4,7 @@ import (
 	"math"
 	"strings"
 
+	"timeline/pkg/filter"
 	"timeline/pkg/gitbackend"
 	"timeline/pkg/models"
 )
@@ -16,9 +17,9 @@ type AuthorStat struct {
 
 // ContributorStats holds contributor metrics and subsystem breakdowns.
 type ContributorStats struct {
-	TotalLines int                            `json:"total_lines"`
-	Authors    map[string]AuthorStat          `json:"authors"`
-	Subsystems map[string]map[string]int      `json:"subsystems"`
+	TotalLines int                       `json:"total_lines"`
+	Authors    map[string]AuthorStat     `json:"authors"`
+	Subsystems map[string]map[string]int `json:"subsystems"`
 }
 
 // BlameEngine analyzes configuration line attribution and contributors.
@@ -34,12 +35,17 @@ func NewBlameEngine(backend *gitbackend.GitBackend) *BlameEngine {
 	return &BlameEngine{GitBackend: backend}
 }
 
-// GetBlameLines returns blame entries, optionally filtered.
+// GetBlameLines returns blame entries at HEAD, optionally filtered.
 func (e *BlameEngine) GetBlameLines(mode, filterQuery string) []models.BlameEntry {
+	return e.GetBlameLinesAtCommit(mode, "HEAD", filterQuery)
+}
+
+// GetBlameLinesAtCommit returns blame entries for a specific commit SHA, optionally filtered.
+func (e *BlameEngine) GetBlameLinesAtCommit(mode, commitSHA, filterQuery string) []models.BlameEntry {
 	if mode == "" {
 		mode = "cli"
 	}
-	allEntries := e.GitBackend.GetBlameEntries(mode)
+	allEntries := e.GitBackend.GetBlameEntriesAtCommit(mode, commitSHA)
 
 	cleanFilter := strings.ToLower(strings.TrimSpace(filterQuery))
 	if cleanFilter == "" {
@@ -48,7 +54,7 @@ func (e *BlameEngine) GetBlameLines(mode, filterQuery string) []models.BlameEntr
 
 	var filtered []models.BlameEntry
 	for _, entry := range allEntries {
-		if strings.Contains(strings.ToLower(entry.Content), cleanFilter) ||
+		if filter.IsPathMatching(entry.Content, filterQuery) ||
 			strings.Contains(strings.ToLower(entry.Author), cleanFilter) ||
 			strings.Contains(strings.ToLower(entry.CommitSHA), cleanFilter) {
 			filtered = append(filtered, entry)
@@ -57,9 +63,14 @@ func (e *BlameEngine) GetBlameLines(mode, filterQuery string) []models.BlameEntr
 	return filtered
 }
 
-// GetContributorStats calculates author contributions and subsystem metrics.
+// GetContributorStats calculates author contributions and subsystem metrics at HEAD.
 func (e *BlameEngine) GetContributorStats(mode string) ContributorStats {
-	entries := e.GitBackend.GetBlameEntries(mode)
+	return e.GetContributorStatsAtCommit(mode, "HEAD")
+}
+
+// GetContributorStatsAtCommit calculates author contributions and subsystem metrics at a specific commit SHA.
+func (e *BlameEngine) GetContributorStatsAtCommit(mode, commitSHA string) ContributorStats {
+	entries := e.GitBackend.GetBlameEntriesAtCommit(mode, commitSHA)
 	totalLines := len(entries)
 
 	authorsCount := make(map[string]int)
@@ -78,18 +89,7 @@ func (e *BlameEngine) GetContributorStats(mode string) ContributorStats {
 		}
 		authorsCount[author]++
 
-		// Subsystem categorization
-		content := strings.ToLower(entry.Content)
-		sub := "other"
-		if strings.Contains(content, " acl ") || strings.Contains(content, "/acl") {
-			sub = "acl"
-		} else if strings.Contains(content, " interface") || strings.Contains(content, "/interface") {
-			sub = "interfaces"
-		} else if strings.Contains(content, " network-instance") || strings.Contains(content, "/network-instance") {
-			sub = "network-instance"
-		} else if strings.Contains(content, " system") || strings.Contains(content, "/system") {
-			sub = "system"
-		}
+		sub := classifySubsystem(entry.Content)
 		subsystems[sub][author]++
 	}
 
@@ -110,4 +110,37 @@ func (e *BlameEngine) GetContributorStats(mode string) ContributorStats {
 		Authors:    authors,
 		Subsystems: subsystems,
 	}
+}
+
+func classifySubsystem(content string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(content))
+	// Check root container prefix first so "/system/control-plane-traffic/input/acl" is classified as "system"
+	// and "/network-instance/default/interface" is classified as "network-instance".
+	if strings.HasPrefix(trimmed, "set / system ") || trimmed == "set / system" || strings.HasPrefix(trimmed, "/system") {
+		return "system"
+	}
+	if strings.HasPrefix(trimmed, "set / network-instance ") || trimmed == "set / network-instance" || strings.HasPrefix(trimmed, "/network-instance") {
+		return "network-instance"
+	}
+	if strings.HasPrefix(trimmed, "set / interface ") || trimmed == "set / interface" || strings.HasPrefix(trimmed, "/interface") {
+		return "interfaces"
+	}
+	if strings.HasPrefix(trimmed, "set / acl ") || trimmed == "set / acl" || strings.HasPrefix(trimmed, "/acl") {
+		return "acl"
+	}
+
+	// Fallback for JSON lines or partial paths
+	if strings.Contains(trimmed, " network-instance") || strings.Contains(trimmed, "/network-instance") {
+		return "network-instance"
+	}
+	if strings.Contains(trimmed, " system") || strings.Contains(trimmed, "/system") {
+		return "system"
+	}
+	if strings.Contains(trimmed, " interface") || strings.Contains(trimmed, "/interface") {
+		return "interfaces"
+	}
+	if strings.Contains(trimmed, " acl ") || strings.Contains(trimmed, "/acl") {
+		return "acl"
+	}
+	return "other"
 }

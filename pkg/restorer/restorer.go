@@ -2,11 +2,15 @@ package restorer
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
+	"timeline/pkg/daemon"
+	"timeline/pkg/differ"
 	"timeline/pkg/filter"
 	"timeline/pkg/gitbackend"
+	"timeline/pkg/models"
 	"timeline/pkg/normalizer"
 	"timeline/pkg/srlclient"
 )
@@ -51,11 +55,14 @@ func (r *ConfigRestorer) RestoreFullConfig(targetCommitSHA string) (bool, string
 
 	msg := fmt.Sprintf("Restored full configuration to revision %s", shortSHA)
 	meta := map[string]interface{}{
-		"is_restored":        true,
+		"is_restored":       true,
 		"restored_from_sha": targetCommitSHA,
 	}
 
-	// 2. Record timeline commit using target configuration
+	// 2. Record timeline commit synchronously under the record lock
+	unlock := daemon.AcquireRecordLock()
+	defer unlock()
+
 	_, newSHA, recErr := r.GitBackend.RecordConfigChange(
 		targetCfg,
 		"admin",
@@ -76,48 +83,109 @@ func (r *ConfigRestorer) RestoreFullConfig(targetCommitSHA string) (bool, string
 	return true, fmt.Sprintf("Successfully restored device configuration to %s (New commit: %s)", shortSHA, newShort), nil
 }
 
-// CherryPickRestore applies one or more subtree/path configurations from a commit to the live switch.
-func (r *ConfigRestorer) CherryPickRestore(targetCommitSHA string, paths ...string) (bool, string, error) {
+// BuildCherryPickCLIStatements generates the ordered "delete / ..." and "set / ..." CLI statements
+// needed to cherry-pick the specified paths from targetCommitSHA.
+func (r *ConfigRestorer) BuildCherryPickCLIStatements(targetCommitSHA string, paths ...string) ([]string, error) {
 	if len(paths) == 0 {
-		return false, "", fmt.Errorf("no cherry-pick paths specified")
+		return nil, fmt.Errorf("no cherry-pick paths specified")
 	}
 	targetCfg := r.GitBackend.GetConfigAtCommit(targetCommitSHA)
 	if len(targetCfg) == 0 {
-		return false, "", fmt.Errorf("commit %s contains no configuration", targetCommitSHA)
+		return nil, fmt.Errorf("commit %s contains no configuration", targetCommitSHA)
 	}
+	parentCfg := r.GitBackend.GetConfigAtCommit(fmt.Sprintf("%s~1", targetCommitSHA))
+	headCfg := r.GitBackend.GetLatestCommitConfig()
 
-	var allCLIStatements []string
-	seenStmts := make(map[string]bool)
+	var deletePaths []string
+	var setStatements []string
+	seenDeletes := make(map[string]bool)
+	seenSets := make(map[string]bool)
 
 	for _, p := range paths {
 		p = strings.TrimSpace(p)
 		if p == "" {
 			continue
 		}
+
 		subtree := filter.FilterConfigSubtree(targetCfg, p)
-		if len(subtree) == 0 {
-			continue
+		diffRes := differ.SemanticDiff(parentCfg, targetCfg, p)
+		headDiffRes := differ.SemanticDiff(headCfg, targetCfg, p)
+
+		// Collect deletions from commit delta and from current HEAD under path p
+		var pathDeletes []string
+		for _, c := range append(diffRes.Changes, headDiffRes.Changes...) {
+			if c.DiffType == models.DiffDeleted {
+				if len(filter.FilterConfigSubtree(targetCfg, c.Path)) == 0 {
+					cliDelPath := filter.XPathToCLIPath(c.Path)
+					if cliDelPath != "" && !seenDeletes[cliDelPath] {
+						seenDeletes[cliDelPath] = true
+						pathDeletes = append(pathDeletes, cliDelPath)
+					}
+				}
+			}
 		}
-		stmts := normalizer.JSONToFlatCLI(subtree, "")
-		for _, s := range stmts {
-			if !seenStmts[s] {
-				seenStmts[s] = true
-				allCLIStatements = append(allCLIStatements, s)
+
+		// If p itself is absent in targetCfg and existed in parentCfg or headCfg, emit delete for p
+		if len(subtree) == 0 && len(pathDeletes) == 0 {
+			if len(filter.FilterConfigSubtree(parentCfg, p)) > 0 || len(filter.FilterConfigSubtree(headCfg, p)) > 0 {
+				cliDelPath := filter.XPathToCLIPath(p)
+				if cliDelPath != "" && !seenDeletes[cliDelPath] {
+					seenDeletes[cliDelPath] = true
+					pathDeletes = append(pathDeletes, cliDelPath)
+				}
+			}
+		}
+
+		deletePaths = append(deletePaths, pathDeletes...)
+
+		if len(subtree) > 0 {
+			stmts := normalizer.JSONToFlatCLI(subtree, "")
+			for _, s := range stmts {
+				if !seenSets[s] {
+					seenSets[s] = true
+					setStatements = append(setStatements, s)
+				}
 			}
 		}
 	}
 
-	if len(allCLIStatements) == 0 {
-		return false, "", fmt.Errorf("no configuration statements generated for specified paths %v in revision %s", paths, targetCommitSHA)
+	// Prune redundant child delete paths when a parent container/list item is already deleted
+	sort.Strings(deletePaths)
+	var prunedDeletes []string
+	for _, dp := range deletePaths {
+		redundant := false
+		for _, parent := range prunedDeletes {
+			if strings.HasPrefix(dp, parent+" ") {
+				redundant = true
+				break
+			}
+		}
+		if !redundant {
+			prunedDeletes = append(prunedDeletes, dp)
+		}
 	}
 
-	// 1. Prepare transactional CLI statements
-	cliCommands := []string{"enter candidate"}
-	cliCommands = append(cliCommands, allCLIStatements...)
-	cliCommands = append(cliCommands, "commit save", "quit")
+	var allCLIStatements []string
+	for _, dp := range prunedDeletes {
+		allCLIStatements = append(allCLIStatements, fmt.Sprintf("delete / %s", dp))
+	}
+	allCLIStatements = append(allCLIStatements, setStatements...)
 
-	// 2. Apply to device first
-	ok, outMsg, err := r.SRLClient.ExecuteCLI(cliCommands)
+	if len(allCLIStatements) == 0 {
+		return nil, fmt.Errorf("no configuration statements generated for specified paths %v in revision %s", paths, targetCommitSHA)
+	}
+	return allCLIStatements, nil
+}
+
+// CherryPickRestore applies one or more subtree/path configurations from a commit to the live switch.
+func (r *ConfigRestorer) CherryPickRestore(targetCommitSHA string, paths ...string) (bool, string, error) {
+	allCLIStatements, err := r.BuildCherryPickCLIStatements(targetCommitSHA, paths...)
+	if err != nil {
+		return false, "", err
+	}
+
+	// 1. Apply to device first (ExecuteCLI wraps statements in an isolated timeline-tx candidate transaction)
+	ok, outMsg, err := r.SRLClient.ExecuteCLI(allCLIStatements)
 	if err != nil || !ok {
 		return false, "", fmt.Errorf("failed to apply cherry-pick to device: %v (CLI output: %s)", err, outMsg)
 	}
@@ -138,26 +206,27 @@ func (r *ConfigRestorer) CherryPickRestore(targetCommitSHA string, paths ...stri
 
 	msg := fmt.Sprintf("Cherry-pick restored %s from %s", pathSummary, shortSHA)
 	meta := map[string]interface{}{
+		"is_restored":        true,
 		"cherry_picked_from": targetCommitSHA,
 		"cherry_pick_paths":  paths,
 	}
 
-	// 3. Asynchronously record the new running state in timeline git
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		verifiedCfg, err := r.SRLClient.GetRunningConfig("/")
-		if err == nil && len(verifiedCfg) > 0 {
-			_, _, _ = r.GitBackend.RecordConfigChange(
-				verifiedCfg,
-				"admin",
-				"",
-				"",
-				time.Now().UTC(),
-				msg,
-				meta,
-			)
-		}
-	}()
+	// 2. Synchronously record the new running state in timeline git under the record lock
+	unlock := daemon.AcquireRecordLock()
+	defer unlock()
+
+	verifiedCfg, fetchErr := r.SRLClient.GetRunningConfig("/")
+	if fetchErr == nil && len(verifiedCfg) > 0 {
+		_, _, _ = r.GitBackend.RecordConfigChange(
+			verifiedCfg,
+			"admin",
+			"",
+			"",
+			time.Now().UTC(),
+			msg,
+			meta,
+		)
+	}
 
 	return true, fmt.Sprintf("Successfully cherry-picked %s to device from %s", pathSummary, shortSHA), nil
 }

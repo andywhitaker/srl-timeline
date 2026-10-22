@@ -63,6 +63,19 @@ type NotificationMsg struct {
 
 type clearNotificationMsg struct{}
 
+type systemInfoMsg struct {
+	info map[string]string
+}
+
+type headSHAMsg struct {
+	sha string
+}
+
+type remoteSyncStatusMsg struct {
+	status string
+	pubKey string
+}
+
 // AppModel is the primary Bubble Tea model.
 type AppModel struct {
 	// Sub-components
@@ -91,18 +104,19 @@ type AppModel struct {
 	BlameEngine *blame.BlameEngine
 
 	// State
-	FocusedPane  FocusedPane
-	ActiveTab    ActiveTab
-	Notification string
-	NotifyStyle  lipgloss.Style
-	Width              int
-	Height             int
-	FocusFilter        bool
-	VsLive             bool
-	lastHeadSHA        string
-	cachedLiveConfig   map[string]interface{}
-	liveConfigFetched  time.Time
-	isFetchingLiveCfg  bool
+	FocusedPane       FocusedPane
+	ActiveTab         ActiveTab
+	Notification      string
+	NotifyStyle       lipgloss.Style
+	Width             int
+	Height            int
+	FocusFilter       bool
+	VsLive            bool
+	lastHeadSHA       string
+	cachedLiveConfig  map[string]interface{}
+	liveConfigFetched time.Time
+	isFetchingLiveCfg bool
+	isCheckingHead    bool
 
 	// Realtime channel
 	commitChan chan models.TimelineCommit
@@ -188,21 +202,45 @@ func fetchLiveConfigCmd(client *srlclient.SRLClient) tea.Cmd {
 	}
 }
 
+func fetchSystemInfoCmd(client *srlclient.SRLClient) tea.Cmd {
+	return func() tea.Msg {
+		if client == nil {
+			return systemInfoMsg{info: nil}
+		}
+		return systemInfoMsg{info: client.GetSystemInfo()}
+	}
+}
+
+func checkHeadSHACmd(backend *gitbackend.GitBackend) tea.Cmd {
+	return func() tea.Msg {
+		if backend == nil {
+			return headSHAMsg{}
+		}
+		return headSHAMsg{sha: backend.GetHeadSHA()}
+	}
+}
+
+func fetchRemoteStatusCmd(backend *gitbackend.GitBackend) tea.Cmd {
+	return func() tea.Msg {
+		if backend == nil {
+			return remoteSyncStatusMsg{}
+		}
+		return remoteSyncStatusMsg{
+			status: backend.CheckRemoteSyncStatus(),
+			pubKey: backend.GetPublicSSHKey(),
+		}
+	}
+}
+
 // Init starts the Bubble Tea loop and background daemon if not already running.
 func (m AppModel) Init() tea.Cmd {
 	if !daemon.IsDaemonRunning(daemon.DefaultPIDFile) && !daemon.IsDaemonRunning(daemon.FallbackPIDFile) {
 		m.Daemon.Start()
+		daemon.WriteCurrentPIDFile()
 	}
 
-	// Load system info
-	go func() {
-		info := m.SRLClient.GetSystemInfo()
-		m.HeaderBar.Hostname = info["host-name"]
-		m.HeaderBar.Version = info["version"]
-		m.HeaderBar.Chassis = info["chassis"]
-	}()
-
 	return tea.Batch(
+		fetchSystemInfoCmd(m.SRLClient),
 		tickLiveDiskSyncCmd(),
 		waitForRealtimeCommit(m.commitChan),
 		tea.EnterAltScreen,
@@ -223,6 +261,60 @@ func clearNotificationCmd() tea.Cmd {
 	})
 }
 
+func (m *AppModel) setNotification(text string, style lipgloss.Style) {
+	wasEmpty := m.Notification == ""
+	m.Notification = text
+	m.NotifyStyle = style
+	isEmpty := m.Notification == ""
+	if wasEmpty != isEmpty && m.Width > 0 && m.Height > 0 {
+		m.syncPaneHeights()
+	}
+}
+
+func (m *AppModel) syncPaneHeights() {
+	if m.Width == 0 || m.Height == 0 {
+		return
+	}
+	notifExtra := 0
+	if m.Notification != "" {
+		notifExtra = 1
+	}
+
+	timelinePaneHeight := m.Height - 8 - notifExtra
+	if timelinePaneHeight < 5 {
+		timelinePaneHeight = 5
+	}
+
+	detailPaneHeight := m.Height - 9 - notifExtra
+	if detailPaneHeight < 4 {
+		detailPaneHeight = 4
+	}
+
+	timelineOuterWidth := (m.Width * 38) / 100
+	if timelineOuterWidth < 35 {
+		timelineOuterWidth = 35
+	}
+	if timelineOuterWidth > m.Width-42 {
+		timelineOuterWidth = m.Width - 42
+	}
+	if timelineOuterWidth < 20 {
+		timelineOuterWidth = 20
+	}
+
+	detailOuterWidth := m.Width - timelineOuterWidth - 1
+	if detailOuterWidth < 20 {
+		detailOuterWidth = 20
+	}
+
+	timelineInnerWidth := timelineOuterWidth - 2
+	detailInnerWidth := detailOuterWidth - 2
+
+	m.TimelineView.SetSize(timelineInnerWidth, timelinePaneHeight)
+	m.DiffView.SetSize(detailInnerWidth, detailPaneHeight)
+	m.ConfigView.SetSize(detailInnerWidth, detailPaneHeight)
+	m.BlameView.SetSize(detailInnerWidth, detailPaneHeight)
+}
+
 // Update processes Bubble Tea events and coordinates state changes.
 func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
@@ -232,6 +324,29 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Width = msg.Width
 		m.Height = msg.Height
 		m.resizeLayout(msg.Width, msg.Height)
+
+	case systemInfoMsg:
+		if len(msg.info) > 0 {
+			if hn := msg.info["host-name"]; hn != "" {
+				m.HeaderBar.Hostname = hn
+			}
+			if ver := msg.info["version"]; ver != "" {
+				m.HeaderBar.Version = ver
+			}
+			if ch := msg.info["chassis"]; ch != "" {
+				m.HeaderBar.Chassis = ch
+			}
+		}
+
+	case remoteSyncStatusMsg:
+		if m.ActiveModal == ModalRemote {
+			if msg.status != "" {
+				m.RemoteModal.Config.SyncStatus = msg.status
+			}
+			if msg.pubKey != "" {
+				m.RemoteModal.Config.PublicKey = msg.pubKey
+			}
+		}
 
 	case liveConfigMsg:
 		m.isFetchingLiveCfg = false
@@ -244,7 +359,19 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case checkLiveDiskSyncMsg:
-		currentHead := m.GitBackend.GetHeadSHA()
+		if !m.isCheckingHead {
+			m.isCheckingHead = true
+			cmds = append(cmds, checkHeadSHACmd(m.GitBackend))
+		}
+		if m.VsLive && !m.isFetchingLiveCfg && time.Since(m.liveConfigFetched) > 3*time.Second {
+			m.isFetchingLiveCfg = true
+			cmds = append(cmds, fetchLiveConfigCmd(m.SRLClient))
+		}
+		cmds = append(cmds, tickLiveDiskSyncCmd())
+
+	case headSHAMsg:
+		m.isCheckingHead = false
+		currentHead := msg.sha
 		if currentHead != "" && currentHead != m.lastHeadSHA {
 			m.lastHeadSHA = currentHead
 			m.cachedLiveConfig = m.GitBackend.GetLatestCommitConfig()
@@ -252,41 +379,42 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshTimeline()
 			selected := m.TimelineView.SelectedCommit()
 			if selected != nil && selected.FullSHA == currentHead {
-				m.Notification = fmt.Sprintf("⚡ Live update by %s: %s", selected.Author, selected.Message)
-				m.NotifyStyle = lipgloss.NewStyle().Background(ColorSuccess).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+				m.setNotification(
+					fmt.Sprintf("⚡ Live update by %s: %s", selected.Author, selected.Message),
+					lipgloss.NewStyle().Background(ColorSuccess).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+				)
 				cmds = append(cmds, clearNotificationCmd())
 			}
-		} else if m.VsLive && !m.isFetchingLiveCfg && time.Since(m.liveConfigFetched) > 3*time.Second {
-			m.isFetchingLiveCfg = true
-			cmds = append(cmds, fetchLiveConfigCmd(m.SRLClient))
 		}
-		cmds = append(cmds, tickLiveDiskSyncCmd())
 
 	case RealtimeCommitMsg:
 		m.lastHeadSHA = msg.Commit.FullSHA
 		m.cachedLiveConfig = m.GitBackend.GetLatestCommitConfig()
 		m.liveConfigFetched = time.Now()
-		m.Notification = fmt.Sprintf("⚡ Realtime commit by %s: %s", msg.Commit.Author, msg.Commit.Message)
-		m.NotifyStyle = lipgloss.NewStyle().Background(ColorSuccess).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+		m.setNotification(
+			fmt.Sprintf("⚡ Realtime commit by %s: %s", msg.Commit.Author, msg.Commit.Message),
+			lipgloss.NewStyle().Background(ColorSuccess).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+		)
 		cmds = append(cmds, clearNotificationCmd())
 		m.refreshTimeline()
 		cmds = append(cmds, waitForRealtimeCommit(m.commitChan))
 
 	case NotificationMsg:
-		m.Notification = msg.Message
+		var style lipgloss.Style
 		switch msg.Severity {
 		case "error":
-			m.NotifyStyle = lipgloss.NewStyle().Background(ColorDanger).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+			style = lipgloss.NewStyle().Background(ColorDanger).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
 		case "warning":
-			m.NotifyStyle = lipgloss.NewStyle().Background(ColorWarning).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+			style = lipgloss.NewStyle().Background(ColorWarning).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
 		default:
-			m.NotifyStyle = lipgloss.NewStyle().Background(ColorSuccess).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+			style = lipgloss.NewStyle().Background(ColorSuccess).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
 		}
+		m.setNotification(msg.Message, style)
 		m.refreshTimeline()
 		cmds = append(cmds, clearNotificationCmd())
 
 	case clearNotificationMsg:
-		m.Notification = ""
+		m.setNotification("", m.NotifyStyle)
 
 	case tea.KeyMsg:
 		// If Modal is open, delegate exclusively to Modal
@@ -413,6 +541,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			m.Daemon.Stop()
+			daemon.RemoveOwnPIDFile()
 			return m, tea.Quit
 
 		case "r":
@@ -426,8 +555,10 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "R", "ctrl+r", "f5":
 			m.lastHeadSHA = m.GitBackend.GetHeadSHA()
 			m.refreshTimeline()
-			m.Notification = "Refreshed timeline from disk"
-			m.NotifyStyle = lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+			m.setNotification(
+				"Refreshed timeline from disk",
+				lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+			)
 			cmds = append(cmds, clearNotificationCmd())
 			return m, tea.Batch(cmds...)
 
@@ -452,11 +583,14 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "g":
 			remoteCfg := m.GitBackend.LoadRemoteConfig()
-			remoteCfg.SyncStatus = m.GitBackend.CheckRemoteSyncStatus()
-			remoteCfg.PublicKey = m.GitBackend.GetPublicSSHKey()
+			if remoteCfg.URL == "" {
+				remoteCfg.SyncStatus = "Not Configured"
+			} else {
+				remoteCfg.SyncStatus = "Checking..."
+			}
 			m.RemoteModal = modals.NewRemoteModal(remoteCfg, m.Width, m.Height)
 			m.ActiveModal = ModalRemote
-			return m, nil
+			return m, fetchRemoteStatusCmd(m.GitBackend)
 
 		case "?":
 			m.HelpModal = modals.NewHelpModal(m.Width, m.Height)
@@ -471,37 +605,47 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "1", "u":
 				m.DiffView.DiffMode = "unified"
 				m.DiffView.UpdateContent()
-				m.Notification = "Diff Format: UNIFIED [1]"
-				m.NotifyStyle = lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+				m.setNotification(
+					"Diff Format: UNIFIED [1]",
+					lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+				)
 				cmds = append(cmds, clearNotificationCmd())
 				return m, tea.Batch(cmds...)
 			case "2":
 				m.DiffView.DiffMode = "path"
 				m.DiffView.UpdateContent()
-				m.Notification = "Diff Format: PATH CHANGES [2]"
-				m.NotifyStyle = lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+				m.setNotification(
+					"Diff Format: PATH CHANGES [2]",
+					lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+				)
 				cmds = append(cmds, clearNotificationCmd())
 				return m, tea.Batch(cmds...)
 			case "3":
 				m.DiffView.DiffMode = "cli"
 				m.DiffView.UpdateContent()
-				m.Notification = "Diff Format: FLAT CLI DIFF [3]"
-				m.NotifyStyle = lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+				m.setNotification(
+					"Diff Format: FLAT CLI DIFF [3]",
+					lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+				)
 				cmds = append(cmds, clearNotificationCmd())
 				return m, tea.Batch(cmds...)
 			case "4", "v":
 				m.VsLive = !m.VsLive
 				m.DiffView.VsLive = m.VsLive
+				var notif string
 				if m.VsLive {
-					m.Notification = "Diff Mode: Comparing revision vs LIVE Running Configuration [4/v]"
+					notif = "Diff Mode: Comparing revision vs LIVE Running Configuration [4/v]"
 					if !m.isFetchingLiveCfg {
 						m.isFetchingLiveCfg = true
 						cmds = append(cmds, fetchLiveConfigCmd(m.SRLClient))
 					}
 				} else {
-					m.Notification = "Diff Mode: Comparing revision vs Previous Commit"
+					notif = "Diff Mode: Comparing revision vs Previous Commit"
 				}
-				m.NotifyStyle = lipgloss.NewStyle().Background(ColorWarning).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+				m.setNotification(
+					notif,
+					lipgloss.NewStyle().Background(ColorWarning).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+				)
 				cmds = append(cmds, clearNotificationCmd())
 				m.updateActiveTabContent()
 				return m, tea.Batch(cmds...)
@@ -512,15 +656,19 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "1":
 				m.ConfigView.FormatMode = "cli"
 				m.ConfigView.UpdateContent()
-				m.Notification = "Config Format: FLAT CLI SYNTAX [1]"
-				m.NotifyStyle = lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+				m.setNotification(
+					"Config Format: FLAT CLI SYNTAX [1]",
+					lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+				)
 				cmds = append(cmds, clearNotificationCmd())
 				return m, tea.Batch(cmds...)
 			case "2", "j":
 				m.ConfigView.FormatMode = "json"
 				m.ConfigView.UpdateContent()
-				m.Notification = "Config Format: JSON HIERARCHY [2]"
-				m.NotifyStyle = lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+				m.setNotification(
+					"Config Format: JSON HIERARCHY [2]",
+					lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+				)
 				cmds = append(cmds, clearNotificationCmd())
 				return m, tea.Batch(cmds...)
 			}
@@ -829,8 +977,10 @@ func (m AppModel) handleModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if close {
 			m.ActiveModal = ModalNone
 			if confirmed {
-				m.Notification = "Applying configuration restore to SR Linux switch..."
-				m.NotifyStyle = lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+				m.setNotification(
+					"Applying configuration restore to SR Linux switch...",
+					lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+				)
 				sha := m.RestoreModal.Commit.FullSHA
 				return m, performRestoreCmd(m.Restorer, sha)
 			}
@@ -849,8 +999,10 @@ func (m AppModel) handleModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				} else {
 					notifyStr = fmt.Sprintf("Applying %d cherry-picked paths to switch...", len(selectedSubtrees))
 				}
-				m.Notification = notifyStr
-				m.NotifyStyle = lipgloss.NewStyle().Background(ColorWarning).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+				m.setNotification(
+					notifyStr,
+					lipgloss.NewStyle().Background(ColorWarning).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+				)
 				sha := m.CherryPickModal.Commit.FullSHA
 				return m, performCherryPickCmd(m.Restorer, sha, selectedSubtrees...)
 			}
@@ -863,19 +1015,42 @@ func (m AppModel) handleModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if close {
 			m.ActiveModal = ModalNone
 			if format == "startup" {
-				ok, resMsg, _ := m.Exporter.SaveAsDeviceStartupConfig(m.ExportModal.Commit.FullSHA)
-				if ok {
-					m.Notification = resMsg
-					m.NotifyStyle = lipgloss.NewStyle().Background(ColorSuccess).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
-				}
-			} else if outputPath != "" {
-				if format == "json" {
-					_, _ = m.Exporter.ExportAsStartupJSON(m.ExportModal.Commit.FullSHA, outputPath)
+				ok, resMsg, err := m.Exporter.SaveAsDeviceStartupConfig(m.ExportModal.Commit.FullSHA)
+				if err != nil || !ok {
+					m.setNotification(
+						fmt.Sprintf("Export startup failed: %v", err),
+						lipgloss.NewStyle().Background(ColorDanger).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+					)
 				} else {
-					_, _ = m.Exporter.ExportAsFlatCLI(m.ExportModal.Commit.FullSHA, outputPath)
+					m.setNotification(
+						resMsg,
+						lipgloss.NewStyle().Background(ColorSuccess).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+					)
 				}
-				m.Notification = fmt.Sprintf("Exported revision %s to %s", m.ExportModal.Commit.FullSHA[:8], outputPath)
-				m.NotifyStyle = lipgloss.NewStyle().Background(ColorSuccess).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+				return m, clearNotificationCmd()
+			} else if outputPath != "" {
+				var exportErr error
+				if format == "json" {
+					_, exportErr = m.Exporter.ExportAsStartupJSON(m.ExportModal.Commit.FullSHA, outputPath)
+				} else {
+					_, exportErr = m.Exporter.ExportAsFlatCLI(m.ExportModal.Commit.FullSHA, outputPath)
+				}
+				if exportErr != nil {
+					m.setNotification(
+						fmt.Sprintf("Export failed: %v", exportErr),
+						lipgloss.NewStyle().Background(ColorDanger).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+					)
+				} else {
+					shortSHA := m.ExportModal.Commit.FullSHA
+					if len(shortSHA) > 8 {
+						shortSHA = shortSHA[:8]
+					}
+					m.setNotification(
+						fmt.Sprintf("Exported revision %s to %s", shortSHA, outputPath),
+						lipgloss.NewStyle().Background(ColorSuccess).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+					)
+				}
+				return m, clearNotificationCmd()
 			}
 		}
 
@@ -885,16 +1060,34 @@ func (m AppModel) handleModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if close {
 			m.ActiveModal = ModalNone
 			if save {
-				_ = m.GitBackend.SaveRemoteConfig(m.RemoteModal.Config)
-				m.Notification = "Saved Remote Git configuration"
-				m.NotifyStyle = lipgloss.NewStyle().Background(ColorSuccess).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+				if err := m.GitBackend.SaveRemoteConfig(m.RemoteModal.Config); err != nil {
+					m.setNotification(
+						fmt.Sprintf("Failed to save remote config: %v", err),
+						lipgloss.NewStyle().Background(ColorDanger).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+					)
+				} else {
+					m.setNotification(
+						"Saved Remote Git configuration",
+						lipgloss.NewStyle().Background(ColorSuccess).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+					)
+				}
+				return m, clearNotificationCmd()
 			}
 		}
 		if pushNow {
-			_ = m.GitBackend.SaveRemoteConfig(m.RemoteModal.Config)
+			if err := m.GitBackend.SaveRemoteConfig(m.RemoteModal.Config); err != nil {
+				m.ActiveModal = ModalNone
+				m.setNotification(
+					fmt.Sprintf("Failed to save remote config: %v", err),
+					lipgloss.NewStyle().Background(ColorDanger).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+				)
+				return m, clearNotificationCmd()
+			}
 			m.ActiveModal = ModalNone
-			m.Notification = "Pushing commits to remote repository..."
-			m.NotifyStyle = lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+			m.setNotification(
+				"Pushing commits to remote repository...",
+				lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+			)
 			return m, performPushRemoteCmd(m.GitBackend)
 		}
 
@@ -962,43 +1155,7 @@ func (m *AppModel) resizeLayout(width, height int) {
 	m.FilterBar.SetWidth(width)
 	m.FooterBar.Width = width
 
-	timelinePaneHeight := height - 8
-	if timelinePaneHeight < 5 {
-		timelinePaneHeight = 5
-	}
-
-	detailPaneHeight := height - 9
-	if detailPaneHeight < 4 {
-		detailPaneHeight = 4
-	}
-
-	timelineOuterWidth := (width * 38) / 100
-	if timelineOuterWidth < 35 {
-		timelineOuterWidth = 35
-	}
-	if timelineOuterWidth > width-42 {
-		timelineOuterWidth = width - 42
-	}
-	if timelineOuterWidth < 20 {
-		timelineOuterWidth = 20
-	}
-
-	// 1 character gap between left timeline pane and right detail pane
-	detailOuterWidth := width - timelineOuterWidth - 1
-	if detailOuterWidth < 20 {
-		detailOuterWidth = 20
-	}
-
-	// Inner content widths for borderStyle.Width(w)
-	// Since border adds 1 char left + 1 char right (2 total), Style.Width(outerWidth - 2) renders exactly outerWidth
-	timelineInnerWidth := timelineOuterWidth - 2
-	detailInnerWidth := detailOuterWidth - 2
-
-	m.TimelineView.SetSize(timelineInnerWidth, timelinePaneHeight)
-	m.DiffView.SetSize(detailInnerWidth, detailPaneHeight)
-	m.ConfigView.SetSize(detailInnerWidth, detailPaneHeight)
-	m.BlameView.SetSize(detailInnerWidth, detailPaneHeight)
-
+	m.syncPaneHeights()
 	m.refreshTimeline()
 }
 
@@ -1017,7 +1174,7 @@ func (m *AppModel) refreshTimeline() {
 	m.updateActiveTabContent()
 }
 
-// updateActiveTabContent only updates the currently active tab in microsecond time!
+// updateActiveTabContent only updates the currently active tab.
 func (m *AppModel) updateActiveTabContent() {
 	selected := m.TimelineView.SelectedCommit()
 	if selected == nil {
@@ -1049,8 +1206,8 @@ func (m *AppModel) updateActiveTabContent() {
 		m.ConfigView.SetConfig(cfg, filterQuery)
 
 	case TabBlame:
-		entries := m.BlameEngine.GetBlameLines("cli", filterQuery)
-		stats := m.BlameEngine.GetContributorStats("cli")
+		entries := m.BlameEngine.GetBlameLinesAtCommit("cli", selected.FullSHA, filterQuery)
+		stats := m.BlameEngine.GetContributorStatsAtCommit("cli", selected.FullSHA)
 		m.BlameView.SetBlame(entries, stats)
 	}
 }
@@ -1172,6 +1329,7 @@ func RunTUI(initialFilter string) error {
 	if os.Getenv("NO_COLOR") == "" {
 		lipgloss.SetColorProfile(termenv.TrueColor)
 	}
+	defer daemon.RemoveOwnPIDFile()
 	p := tea.NewProgram(
 		NewAppModel(nil, nil, initialFilter),
 		tea.WithAltScreen(),

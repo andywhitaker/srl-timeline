@@ -40,9 +40,14 @@ func (m RestoreModalModel) View() string {
 			"with the snapshot from the selected revision!",
 	)
 
+	shortSHA := m.Commit.FullSHA
+	if len(shortSHA) > 8 {
+		shortSHA = shortSHA[:8]
+	}
+
 	details := fmt.Sprintf(
 		"Target Commit: %s\nAuthor:        %s\nDate:          %s\nSummary:       %s",
-		m.Commit.FullSHA[:8],
+		shortSHA,
 		m.Commit.Author,
 		m.Commit.FormattedTime(),
 		m.Commit.Message,

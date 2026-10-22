@@ -31,10 +31,35 @@ func init() {
 	}
 }
 
+func printUsage() {
+	fmt.Printf(`srl-timeline v%s — Interactive Configuration History & Rollback for Nokia SR Linux
+
+Usage:
+  timeline [--filter <path>]                     Launch interactive Bubble Tea TUI
+  timeline tui [--filter <path>]                 Launch interactive Bubble Tea TUI
+  timeline log [--limit <n>] [--filter <path>]   Show configuration commit history
+  timeline diff [<rev1> [<rev2>]] [--format unified|cli|path] [--filter <path>]
+  timeline show [<rev>|running] [--format cli|json] [--filter <path>]
+  timeline restore <commit-sha> [--path <subtree>] [--yes]
+  timeline cherry-pick <commit-sha> --path <subtree> [--yes]
+  timeline export [<rev>] [--format json|cli] [--output <file>] [--save-startup]
+  timeline blame [<rev>] [--filter <path|author>]
+  timeline remote [show|key|set <url> [--branch <name>] [--auto-push]|push]
+  timeline daemon [start|stop|status]
+  timeline version
+`, Version)
+}
+
 func main() {
-	if len(os.Args) >= 2 && (os.Args[1] == "-v" || os.Args[1] == "--version" || os.Args[1] == "version") {
-		fmt.Printf("srl-timeline version %s\n", Version)
-		return
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
+		case "-v", "--version", "version":
+			fmt.Printf("srl-timeline version %s\n", Version)
+			return
+		case "-h", "--help", "help":
+			printUsage()
+			return
+		}
 	}
 
 	if len(os.Args) < 2 || strings.HasPrefix(os.Args[1], "-") {
@@ -215,7 +240,7 @@ func main() {
 		restoreFlags := flag.NewFlagSet("restore", flag.ExitOnError)
 		subtreePath := restoreFlags.String("path", "", "Subtree path for cherry-pick restoration (e.g. /interface[name=ethernet-1/1])")
 		yes := restoreFlags.Bool("yes", false, "Confirm restore without prompt")
-		_ = restoreFlags.Parse(reorderFlags(os.Args[2:]))
+		_ = restoreFlags.Parse(reorderFlags(os.Args[2:], "yes"))
 
 		if len(restoreFlags.Args()) == 0 {
 			fmt.Println("Usage: timeline restore <commit-sha> [--path <subtree>] [--yes]")
@@ -276,7 +301,7 @@ func main() {
 		exportFmt := exportFlags.String("format", "json", "Format: json, cli")
 		outPath := exportFlags.String("output", "", "Output file path")
 		saveStartup := exportFlags.Bool("save-startup", false, "Save directly to /etc/opt/srlinux/config.json")
-		_ = exportFlags.Parse(reorderFlags(os.Args[2:]))
+		_ = exportFlags.Parse(reorderFlags(os.Args[2:], "save-startup"))
 
 		rev := "HEAD"
 		if len(exportFlags.Args()) >= 1 {
@@ -323,8 +348,13 @@ func main() {
 		filterQuery := blameFlags.String("filter", "", "Filter blame by path or author")
 		_ = blameFlags.Parse(reorderFlags(os.Args[2:]))
 
+		rev := "HEAD"
+		if len(blameFlags.Args()) >= 1 {
+			rev = blameFlags.Args()[0]
+		}
+
 		b := blame.NewBlameEngine(backend)
-		entries := b.GetBlameLines("cli", *filterQuery)
+		entries := b.GetBlameLinesAtCommit("cli", rev, *filterQuery)
 		for _, e := range entries {
 			fmt.Printf("%-8s (%-10s %s) %s\n", e.ShortSHA(), e.Author, e.Timestamp.Format("2006-01-02"), e.Content)
 		}
@@ -381,7 +411,10 @@ func main() {
 			cfg.URL = url
 			cfg.Branch = branch
 			cfg.AutoPush = autoPush
-			_ = backend.SaveRemoteConfig(cfg)
+			if err := backend.SaveRemoteConfig(cfg); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to save remote configuration: %v\n", err)
+				os.Exit(1)
+			}
 			fmt.Printf("Saved remote repository: %s (branch: %s)\n", url, branch)
 
 		case "push":
@@ -398,17 +431,32 @@ func main() {
 	}
 }
 
-func reorderFlags(args []string) []string {
+func reorderFlags(args []string, boolFlagNames ...string) []string {
+	boolSet := map[string]bool{
+		"-yes": true, "--yes": true,
+		"-y": true, "--y": true,
+		"-startup": true, "--startup": true,
+		"-save-startup": true, "--save-startup": true,
+		"-auto-push": true, "--auto-push": true,
+		"-help": true, "--help": true,
+		"-h": true, "--h": true,
+	}
+	for _, bf := range boolFlagNames {
+		boolSet["-"+bf] = true
+		boolSet["--"+bf] = true
+	}
+
 	var flags, pos []string
 	for i := 0; i < len(args); i++ {
-		if strings.HasPrefix(args[i], "-") {
-			flags = append(flags, args[i])
-			if !strings.Contains(args[i], "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+		arg := args[i]
+		if strings.HasPrefix(arg, "-") {
+			flags = append(flags, arg)
+			if !boolSet[arg] && !strings.Contains(arg, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				flags = append(flags, args[i+1])
 				i++
 			}
 		} else {
-			pos = append(pos, args[i])
+			pos = append(pos, arg)
 		}
 	}
 	return append(flags, pos...)

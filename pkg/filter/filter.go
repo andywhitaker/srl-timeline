@@ -1,6 +1,7 @@
 package filter
 
 import (
+	"fmt"
 	"strings"
 
 	"timeline/pkg/models"
@@ -8,79 +9,227 @@ import (
 	"timeline/pkg/schema"
 )
 
-// IsPathMatching checks if a target path matches a filter query.
-func IsPathMatching(targetPath, filterQuery string) bool {
-	cleanFilter := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(filterQuery, "/")))
-	if cleanFilter == "" {
-		return true
-	}
-	cleanTarget := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(targetPath, "/")))
-	return strings.Contains(cleanTarget, cleanFilter)
+func isDigit(b byte) bool {
+	return b >= '0' && b <= '9'
 }
 
-// TokenizePath converts an XPath, CLI path, or slash path into lower-cased semantic tokens.
+// tokenSegmentMatches checks if targetToken matches queryToken without numeric suffix collisions
+// (e.g. "ethernet-1/1" must NOT match "ethernet-1/10" or "ethernet-1/1.0").
+func tokenSegmentMatches(targetToken, queryToken string) bool {
+	if queryToken == "" {
+		return true
+	}
+	if targetToken == queryToken {
+		return true
+	}
+	searchFrom := 0
+	for searchFrom <= len(targetToken)-len(queryToken) {
+		idx := strings.Index(targetToken[searchFrom:], queryToken)
+		if idx == -1 {
+			return false
+		}
+		idx += searchFrom
+		endIdx := idx + len(queryToken)
+
+		valid := true
+		if idx > 0 && isDigit(queryToken[0]) && isDigit(targetToken[idx-1]) {
+			valid = false
+		}
+		if endIdx < len(targetToken) && isDigit(queryToken[len(queryToken)-1]) {
+			nextCh := targetToken[endIdx]
+			if isDigit(nextCh) || nextCh == '.' {
+				valid = false
+			}
+		}
+		if valid {
+			return true
+		}
+		searchFrom = idx + 1
+	}
+	return false
+}
+
+// IsPathMatching checks if a target path (XPath, slash path, or CLI line) matches a filter query.
+func IsPathMatching(targetPath, filterQuery string) bool {
+	queryTokens := TokenizePath(filterQuery)
+	if len(queryTokens) == 0 {
+		return true
+	}
+	targetTokens := TokenizePath(targetPath)
+	if strings.HasPrefix(strings.TrimSpace(filterQuery), "/") {
+		return isExactPrefixOf(queryTokens, targetTokens)
+	}
+	return tokensMatch(queryTokens, targetTokens)
+}
+
+// TokenizePath converts an XPath, CLI statement, or slash path into lower-cased semantic tokens.
 func TokenizePath(path string) []string {
-	var tokens []string
+	var rawTokens []string
 	var current strings.Builder
 	inBracket := false
+	inQuote := false
+	lastElement := ""
+
+	flushElement := func() {
+		if current.Len() > 0 {
+			token := strings.Trim(current.String(), "/ ")
+			if token != "" {
+				lowerTok := strings.ToLower(normalizer.StripNamespace(token))
+				rawTokens = append(rawTokens, lowerTok)
+				lastElement = lowerTok
+			}
+			current.Reset()
+		}
+	}
 
 	trimmed := strings.TrimSpace(path)
 	for i := 0; i < len(trimmed); i++ {
 		ch := trimmed[i]
 		switch ch {
+		case '"':
+			inQuote = !inQuote
 		case '[':
-			inBracket = true
-			if current.Len() > 0 {
-				token := strings.Trim(current.String(), "/ ")
-				if token != "" {
-					tokens = append(tokens, strings.ToLower(token))
-				}
-				current.Reset()
+			if inQuote {
+				current.WriteByte(ch)
+				continue
 			}
+			inBracket = true
+			flushElement()
 		case ']':
+			if inQuote {
+				current.WriteByte(ch)
+				continue
+			}
 			inBracket = false
-			val := current.String()
-			if idx := strings.Index(val, "="); idx != -1 {
-				val = val[idx+1:]
+			pred := strings.TrimSpace(current.String())
+			current.Reset()
+			keyName := ""
+			val := pred
+			if idx := strings.Index(pred, "="); idx != -1 {
+				keyName = strings.ToLower(normalizer.StripNamespace(strings.TrimSpace(pred[:idx])))
+				val = pred[idx+1:]
 			}
 			val = strings.Trim(val, "\"' ")
 			if val != "" {
-				tokens = append(tokens, strings.ToLower(val))
+				lowerVal := strings.ToLower(val)
+				if (lastElement == "acl-filter" || lastElement == "acl-set") && keyName == "type" {
+					rawTokens = append(rawTokens, "type", lowerVal)
+				} else if lastElement == "prefix" && keyName == "mask-length-range" {
+					rawTokens = append(rawTokens, "mask-length-range", lowerVal)
+				} else {
+					rawTokens = append(rawTokens, lowerVal)
+				}
 			}
-			current.Reset()
 		case '/':
-			if inBracket {
+			if inBracket || inQuote || (i > 0 && i+1 < len(trimmed) && isDigit(trimmed[i+1]) && (isDigit(trimmed[i-1]) || strings.Contains(current.String(), ":"))) {
 				current.WriteByte(ch)
 			} else {
-				token := strings.Trim(current.String(), "/ ")
-				if token != "" {
-					tokens = append(tokens, strings.ToLower(token))
-				}
-				current.Reset()
+				flushElement()
 			}
 		case ' ', '\t':
-			if inBracket {
+			if inBracket || inQuote {
 				current.WriteByte(ch)
 			} else {
-				token := strings.Trim(current.String(), "/ ")
-				if token != "" {
-					tokens = append(tokens, strings.ToLower(token))
-				}
-				current.Reset()
+				flushElement()
 			}
 		default:
 			current.WriteByte(ch)
 		}
 	}
 
-	if current.Len() > 0 {
-		token := strings.Trim(current.String(), "/ ")
-		if token != "" {
-			tokens = append(tokens, strings.ToLower(token))
+	flushElement()
+
+	// Strip leading CLI command verbs ("+", "-", "set", "delete")
+	start := 0
+	for start < len(rawTokens) {
+		tok := rawTokens[start]
+		if tok == "+" || tok == "-" || tok == "set" || tok == "delete" {
+			start++
+		} else {
+			break
+		}
+	}
+	return rawTokens[start:]
+}
+
+// XPathToCLIPath converts an XPath (e.g. "/interface[name=ethernet-1/1]/description" or
+// "/acl/acl-filter[name=cpm][type=ipv4]/entry[sequence-id=10]") into flat SR Linux CLI path tokens.
+func XPathToCLIPath(xpath string) string {
+	trimmed := strings.TrimSpace(xpath)
+	if trimmed == "" || trimmed == "/" {
+		return ""
+	}
+	if !strings.Contains(trimmed, "[") && !strings.HasPrefix(trimmed, "/") {
+		return strings.Join(strings.Fields(trimmed), " ")
+	}
+
+	var parts []string
+	var cur strings.Builder
+	inBracket := false
+	lastElement := ""
+
+	flushElement := func() {
+		if cur.Len() > 0 {
+			el := normalizer.StripNamespace(strings.Trim(cur.String(), "/ "))
+			if el != "" {
+				parts = append(parts, el)
+				lastElement = strings.ToLower(el)
+			}
+			cur.Reset()
 		}
 	}
 
-	return tokens
+	for i := 0; i < len(trimmed); i++ {
+		ch := trimmed[i]
+		switch ch {
+		case '[':
+			flushElement()
+			inBracket = true
+		case ']':
+			inBracket = false
+			pred := strings.TrimSpace(cur.String())
+			cur.Reset()
+			keyName := ""
+			keyVal := pred
+			if idx := strings.Index(pred, "="); idx != -1 {
+				keyName = strings.ToLower(normalizer.StripNamespace(strings.TrimSpace(pred[:idx])))
+				keyVal = strings.Trim(pred[idx+1:], "\"' ")
+			}
+			if keyVal != "" {
+				formattedVal := normalizer.FormatScalarCLI(keyVal)
+				if (lastElement == "acl-filter" || lastElement == "acl-set") && keyName == "type" {
+					parts = append(parts, "type", formattedVal)
+				} else if lastElement == "prefix" && keyName == "mask-length-range" {
+					parts = append(parts, "mask-length-range", formattedVal)
+				} else {
+					parts = append(parts, formattedVal)
+				}
+			}
+		case '/':
+			if inBracket {
+				cur.WriteByte(ch)
+			} else {
+				flushElement()
+			}
+		default:
+			cur.WriteByte(ch)
+		}
+	}
+	flushElement()
+
+	return strings.Join(parts, " ")
+}
+
+func isExactPrefixOf(tokensA, tokensB []string) bool {
+	if len(tokensA) > len(tokensB) {
+		return false
+	}
+	for i := range tokensA {
+		if tokensA[i] != tokensB[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func isPrefixOf(tokensA, tokensB []string) bool {
@@ -88,7 +237,11 @@ func isPrefixOf(tokensA, tokensB []string) bool {
 		return false
 	}
 	for i := range tokensA {
-		if tokensA[i] != tokensB[i] {
+		if i == len(tokensA)-1 {
+			if !tokenSegmentMatches(tokensB[i], tokensA[i]) {
+				return false
+			}
+		} else if tokensA[i] != tokensB[i] {
 			return false
 		}
 	}
@@ -107,8 +260,17 @@ func tokensMatch(queryTokens, targetTokens []string) bool {
 	}
 	qIdx := 0
 	for _, t := range targetTokens {
-		if qIdx < len(queryTokens) && (t == queryTokens[qIdx] || strings.Contains(t, queryTokens[qIdx])) {
-			qIdx++
+		if qIdx < len(queryTokens) {
+			qTok := queryTokens[qIdx]
+			if qIdx < len(queryTokens)-1 {
+				if t == qTok || tokenSegmentMatches(t, qTok) {
+					qIdx++
+				}
+			} else {
+				if tokenSegmentMatches(t, qTok) {
+					qIdx++
+				}
+			}
 		}
 	}
 	return qIdx == len(queryTokens)
@@ -119,41 +281,25 @@ func pathMatchesQuery(currentTokens, queryTokens []string, rawQuery string) bool
 	if rawQuery == "" || len(queryTokens) == 0 {
 		return true
 	}
-	cleanQuery := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(rawQuery, "/")))
-	if cleanQuery == "" {
-		return true
+	if strings.HasPrefix(strings.TrimSpace(rawQuery), "/") {
+		return isExactPrefixOf(queryTokens, currentTokens)
 	}
-
-	slashPath := "/" + strings.Join(currentTokens, "/")
-	if strings.Contains(strings.ToLower(slashPath), cleanQuery) {
-		return true
-	}
-	spacePath := strings.Join(currentTokens, " ")
-	if strings.Contains(strings.ToLower(spacePath), cleanQuery) {
-		return true
-	}
-
-	for _, t := range currentTokens {
-		if strings.Contains(t, cleanQuery) || cleanQuery == t {
-			return true
-		}
-	}
-
 	return tokensMatch(queryTokens, currentTokens)
 }
 
 // FilterConfigSubtree extracts configuration subtrees matching the filter query.
 func FilterConfigSubtree(config map[string]interface{}, filterQuery string) map[string]interface{} {
-	cleanQuery := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(filterQuery, "/")))
-	if cleanQuery == "" {
+	queryTokens := TokenizePath(filterQuery)
+	if len(queryTokens) == 0 {
 		return config
 	}
-
-	queryTokens := TokenizePath(filterQuery)
 
 	result := make(map[string]interface{})
 	for k, v := range config {
 		cleanKey := strings.ToLower(normalizer.StripNamespace(k))
+		if strings.HasPrefix(cleanKey, "_") {
+			continue
+		}
 		keyTokens := []string{cleanKey}
 		if pathMatchesQuery(keyTokens, queryTokens, filterQuery) {
 			result[k] = v
@@ -178,6 +324,9 @@ func filterSubtreeHelper(node interface{}, queryTokens, currentTokens []string, 
 		filteredMap := make(map[string]interface{})
 		for k, child := range v {
 			cleanK := strings.ToLower(normalizer.StripNamespace(k))
+			if strings.HasPrefix(cleanK, "_") {
+				continue
+			}
 			childTokens := append(append([]string{}, currentTokens...), cleanK)
 			if pathMatchesQuery(childTokens, queryTokens, rawQuery) {
 				filteredMap[k] = child
@@ -195,28 +344,32 @@ func filterSubtreeHelper(node interface{}, queryTokens, currentTokens []string, 
 
 	case []interface{}:
 		var filteredList []interface{}
+		currentPath := strings.Join(currentTokens, " ")
+		listName := ""
+		if len(currentTokens) > 0 {
+			listName = currentTokens[len(currentTokens)-1]
+		}
+
 		for _, item := range v {
 			if itemMap, ok := item.(map[string]interface{}); ok {
-				var keyVal string
-				var listName string
-				if len(currentTokens) > 0 {
-					listName = currentTokens[len(currentTokens)-1]
-				}
-				keys := schema.GetRegistry().GetListKeys("", listName, itemMap)
+				keys := schema.GetRegistry().GetListKeys(currentPath, listName, itemMap)
+				itemTokens := append([]string{}, currentTokens...)
 				for _, lk := range keys {
 					for ik, iv := range itemMap {
-						if strings.ToLower(normalizer.StripNamespace(ik)) == strings.ToLower(lk) {
-							keyVal = strings.ToLower(normalizer.FormatScalarCLI(iv))
+						if strings.EqualFold(normalizer.StripNamespace(ik), lk) {
+							keyVal := strings.ToLower( strings.Trim(normalizer.FormatScalarCLI(iv), "\"") )
+							if keyVal != "" {
+								if (listName == "acl-filter" || listName == "acl-set") && strings.EqualFold(lk, "type") {
+									itemTokens = append(itemTokens, "type", keyVal)
+								} else if listName == "prefix" && strings.EqualFold(lk, "mask-length-range") {
+									itemTokens = append(itemTokens, "mask-length-range", keyVal)
+								} else {
+									itemTokens = append(itemTokens, keyVal)
+								}
+							}
 							break
 						}
 					}
-					if keyVal != "" {
-						break
-					}
-				}
-				itemTokens := currentTokens
-				if keyVal != "" {
-					itemTokens = append(append([]string{}, currentTokens...), keyVal)
 				}
 
 				if pathMatchesQuery(itemTokens, queryTokens, rawQuery) {
@@ -225,12 +378,13 @@ func filterSubtreeHelper(node interface{}, queryTokens, currentTokens []string, 
 					childRes := filterSubtreeHelper(item, queryTokens, itemTokens, rawQuery)
 					if childRes != nil {
 						if childMap, ok := childRes.(map[string]interface{}); ok {
-							// Always preserve list identifying key fields from the original itemMap
-							for k, val := range itemMap {
-								cleanK := normalizer.StripNamespace(k)
-								if isListKeyName(cleanK) {
-									if _, exists := childMap[k]; !exists {
-										childMap[k] = val
+							// Preserve only the actual list identifying key fields from itemMap
+							for _, lk := range keys {
+								for k, val := range itemMap {
+									if strings.EqualFold(normalizer.StripNamespace(k), lk) {
+										if _, exists := childMap[k]; !exists {
+											childMap[k] = val
+										}
 									}
 								}
 							}
@@ -241,7 +395,9 @@ func filterSubtreeHelper(node interface{}, queryTokens, currentTokens []string, 
 					}
 				}
 			} else {
-				if pathMatchesQuery(currentTokens, queryTokens, rawQuery) {
+				scalarToken := strings.ToLower(strings.Trim(normalizer.FormatScalarCLI(item), "\""))
+				elemTokens := append(append([]string{}, currentTokens...), scalarToken)
+				if pathMatchesQuery(elemTokens, queryTokens, rawQuery) {
 					filteredList = append(filteredList, item)
 				}
 			}
@@ -252,25 +408,28 @@ func filterSubtreeHelper(node interface{}, queryTokens, currentTokens []string, 
 		return nil
 
 	default:
-		scalarStr := strings.ToLower(normalizer.FormatScalarCLI(node))
-		cleanQuery := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(rawQuery, "/")))
-		if strings.Contains(scalarStr, cleanQuery) || pathMatchesQuery(currentTokens, queryTokens, rawQuery) {
+		scalarStr := strings.ToLower(strings.Trim(normalizer.FormatScalarCLI(node), "\""))
+		leafTokens := append(append([]string{}, currentTokens...), scalarStr)
+		if pathMatchesQuery(leafTokens, queryTokens, rawQuery) {
+			return node
+		}
+		if !strings.HasPrefix(strings.TrimSpace(rawQuery), "/") && len(queryTokens) == 1 && tokenSegmentMatches(scalarStr, queryTokens[0]) {
 			return node
 		}
 		return nil
 	}
 }
 
-// FilterCLILines filters CLI statements by query.
+// FilterCLILines filters CLI statements by query (supporting both XPath and CLI queries).
 func FilterCLILines(lines []string, filterQuery string) []string {
-	cleanFilter := strings.ToLower(strings.TrimSpace(filterQuery))
-	if cleanFilter == "" {
+	queryTokens := TokenizePath(filterQuery)
+	if len(queryTokens) == 0 {
 		return lines
 	}
 
 	var matched []string
 	for _, l := range lines {
-		if strings.Contains(strings.ToLower(l), cleanFilter) {
+		if IsPathMatching(l, filterQuery) {
 			matched = append(matched, l)
 		}
 	}
@@ -279,15 +438,22 @@ func FilterCLILines(lines []string, filterQuery string) []string {
 
 // FilterDiffResult filters a SemanticDiffResult to only contain changes matching the filter.
 func FilterDiffResult(diffRes models.SemanticDiffResult, filterQuery string) models.SemanticDiffResult {
-	cleanFilter := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(filterQuery, "/")))
-	if cleanFilter == "" {
+	queryTokens := TokenizePath(filterQuery)
+	if len(queryTokens) == 0 {
 		return diffRes
 	}
 
 	var filteredChanges []models.PathChange
 	for _, c := range diffRes.Changes {
-		if strings.Contains(strings.ToLower(c.Path), cleanFilter) {
+		if IsPathMatching(c.Path, filterQuery) || valueMatchesFilter(c.OldValue, c.NewValue, queryTokens) {
 			filteredChanges = append(filteredChanges, c)
+		}
+	}
+
+	var filteredCLI []string
+	for _, l := range diffRes.CLIDiffLines {
+		if IsPathMatching(l, filterQuery) {
+			filteredCLI = append(filteredCLI, l)
 		}
 	}
 
@@ -295,15 +461,8 @@ func FilterDiffResult(diffRes models.SemanticDiffResult, filterQuery string) mod
 	for _, l := range diffRes.UnifiedDiffLines {
 		if strings.HasPrefix(l, "---") || strings.HasPrefix(l, "+++") {
 			filteredUnified = append(filteredUnified, l)
-		} else if strings.Contains(strings.ToLower(l), cleanFilter) {
+		} else if IsPathMatching(l, filterQuery) {
 			filteredUnified = append(filteredUnified, l)
-		}
-	}
-
-	var filteredCLI []string
-	for _, l := range diffRes.CLIDiffLines {
-		if strings.Contains(strings.ToLower(l), cleanFilter) {
-			filteredCLI = append(filteredCLI, l)
 		}
 	}
 
@@ -330,7 +489,22 @@ func FilterDiffResult(diffRes models.SemanticDiffResult, filterQuery string) mod
 	}
 }
 
-func isListKeyName(k string) bool {
-	return schema.GetRegistry().IsListKey("", "", k, nil)
+func valueMatchesFilter(oldVal, newVal interface{}, queryTokens []string) bool {
+	if len(queryTokens) != 1 {
+		return false
+	}
+	q := queryTokens[0]
+	if oldVal != nil {
+		s := strings.ToLower(fmt.Sprintf("%v", oldVal))
+		if tokenSegmentMatches(s, q) {
+			return true
+		}
+	}
+	if newVal != nil {
+		s := strings.ToLower(fmt.Sprintf("%v", newVal))
+		if tokenSegmentMatches(s, q) {
+			return true
+		}
+	}
+	return false
 }
-

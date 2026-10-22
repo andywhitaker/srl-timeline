@@ -12,11 +12,11 @@ import (
 
 // ExportModalModel handles configuration export options.
 type ExportModalModel struct {
-	Commit      models.TimelineCommit
-	Format      string // "json", "cli", "startup"
-	PathInput   textinput.Model
-	Width       int
-	Height      int
+	Commit    models.TimelineCommit
+	Format    string // "json", "cli", "startup"
+	PathInput textinput.Model
+	Width     int
+	Height    int
 }
 
 // NewExportModal creates an export modal.
@@ -44,7 +44,12 @@ func (m ExportModalModel) View() string {
 		Padding(0, 1).
 		Render("💾 EXPORT CONFIGURATION")
 
-	details := fmt.Sprintf("Exporting revision: %s (%s)", m.Commit.FullSHA[:8], m.Commit.Message)
+	shortSHA := m.Commit.FullSHA
+	if len(shortSHA) > 8 {
+		shortSHA = shortSHA[:8]
+	}
+
+	details := fmt.Sprintf("Exporting revision: %s (%s)", shortSHA, m.Commit.Message)
 
 	optJSON := "[1] JSON Startup Format (config.json)"
 	if m.Format == "json" {

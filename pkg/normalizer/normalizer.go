@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -15,6 +16,7 @@ var WellKnownListKeys = []string{
 	"name",
 	"username",
 	"file-name",
+	"buffer-name",
 	"group-name",
 	"community-entry",
 	"peer-address",
@@ -28,11 +30,18 @@ var WellKnownListKeys = []string{
 	"rule-id",
 	"ip-prefix",
 	"address",
+	"ip-address",
 	"type",
 	"protocol",
+	"slot",
+	"vni",
+	"evi",
+	"value",
 }
 
-// StripNamespace removes YANG module prefixes like "srl_nokia-interfaces:interface" -> "interface".
+var yangModulePrefixRe = regexp.MustCompile(`^(?:srl_nokia|openconfig|ietf|iana)-[a-zA-Z0-9_-]+:([a-zA-Z_][a-zA-Z0-9._-]*)$`)
+
+// StripNamespace removes YANG module prefixes on JSON object keys like "srl_nokia-interfaces:interface" -> "interface".
 func StripNamespace(key string) string {
 	if idx := strings.Index(key, ":"); idx != -1 {
 		return key[idx+1:]
@@ -40,29 +49,54 @@ func StripNamespace(key string) string {
 	return key
 }
 
-// NormalizeStructure sorts map keys and YANG list elements deterministically.
+// StripModulePrefixValue removes YANG module prefixes only when a string scalar matches a YANG identityref
+// (e.g. "srl_nokia-network-instance:ip-vrf" -> "ip-vrf"), preserving IPv6 addresses, MACs, communities, and URLs.
+func StripModulePrefixValue(val string) string {
+	if m := yangModulePrefixRe.FindStringSubmatch(val); len(m) == 2 {
+		return m[1]
+	}
+	return val
+}
+
+// NormalizeStructure sorts map keys and YANG list elements deterministically, stripping internal "_" metadata keys.
 func NormalizeStructure(data interface{}, sortLists bool) interface{} {
+	return normalizeStructureAtPath(data, "", "", sortLists)
+}
+
+func normalizeStructureAtPath(data interface{}, currentPath, listName string, sortLists bool) interface{} {
 	switch v := data.(type) {
 	case map[string]interface{}:
 		sortedMap := make(map[string]interface{}, len(v))
 		for k, val := range v {
 			cleanKey := StripNamespace(k)
-			sortedMap[cleanKey] = NormalizeStructure(val, sortLists)
+			if strings.HasPrefix(cleanKey, "_") {
+				continue
+			}
+			subPath := cleanKey
+			if currentPath != "" {
+				subPath = currentPath + "/" + cleanKey
+			} else {
+				subPath = "/" + cleanKey
+			}
+			sortedMap[cleanKey] = normalizeStructureAtPath(val, subPath, cleanKey, sortLists)
 		}
 		return sortedMap
 
 	case []interface{}:
 		normalizedList := make([]interface{}, len(v))
 		for i, item := range v {
-			normalizedList[i] = NormalizeStructure(item, sortLists)
+			normalizedList[i] = normalizeStructureAtPath(item, currentPath, listName, sortLists)
 		}
 
 		if sortLists && len(normalizedList) > 1 {
 			sort.SliceStable(normalizedList, func(i, j int) bool {
-				return listElementKey(normalizedList[i]) < listElementKey(normalizedList[j])
+				return listElementKeyAtPath(currentPath, listName, normalizedList[i]) < listElementKeyAtPath(currentPath, listName, normalizedList[j])
 			})
 		}
 		return normalizedList
+
+	case string:
+		return StripModulePrefixValue(v)
 
 	default:
 		return v
@@ -70,18 +104,43 @@ func NormalizeStructure(data interface{}, sortLists bool) interface{} {
 }
 
 func listElementKey(item interface{}) string {
+	return listElementKeyAtPath("", "", item)
+}
+
+func listElementKeyAtPath(currentPath, listName string, item interface{}) string {
 	m, ok := item.(map[string]interface{})
 	if !ok {
 		return fmt.Sprintf("%v", item)
 	}
 
-	for _, k := range WellKnownListKeys {
-		if val, found := m[k]; found {
-			return fmt.Sprintf("%s=%v", k, val)
+	keys := schema.GetRegistry().GetListKeys(currentPath, listName, m)
+	if len(keys) > 0 {
+		var parts []string
+		for _, k := range keys {
+			if val, found := m[k]; found {
+				parts = append(parts, fmt.Sprintf("%s=%v", k, val))
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, ",")
 		}
 	}
 
-	// Fallback to sorted json of the object
+	var wkParts []string
+	for _, k := range WellKnownListKeys {
+		if val, found := m[k]; found {
+			switch val.(type) {
+			case map[string]interface{}, []interface{}:
+				continue
+			default:
+				wkParts = append(wkParts, fmt.Sprintf("%s=%v", k, val))
+			}
+		}
+	}
+	if len(wkParts) > 0 {
+		return strings.Join(wkParts, ",")
+	}
+
 	b, _ := json.Marshal(m)
 	return string(b)
 }
@@ -101,9 +160,22 @@ func CanonicalJSONString(data interface{}, indent int) (string, error) {
 	return strings.TrimRight(buf.String(), "\n"), nil
 }
 
-// JSONToFlatCLI converts a configuration JSON map into sorted flat CLI set statements.
+func joinPathTokens(base, next string) string {
+	base = strings.TrimSpace(base)
+	next = strings.TrimSpace(next)
+	if base == "" {
+		return next
+	}
+	if next == "" {
+		return base
+	}
+	return base + " " + next
+}
+
+// JSONToFlatCLI converts a configuration JSON map into sorted flat CLI set statements (one scalar leaf per line).
 func JSONToFlatCLI(data interface{}, currentPath string) []string {
 	var lines []string
+	cleanCurrentPath := strings.TrimSpace(currentPath)
 
 	switch v := data.(type) {
 	case map[string]interface{}:
@@ -113,37 +185,34 @@ func JSONToFlatCLI(data interface{}, currentPath string) []string {
 		}
 		sort.Strings(keys)
 
-		var scalarLeaves []string
+		hasChildren := false
 		for _, k := range keys {
 			cleanKey := StripNamespace(k)
 			if strings.HasPrefix(cleanKey, "_") {
-				continue // Skip internal annotations
+				continue // Skip internal annotations (_preamble, _annotate)
 			}
 			val := v[k]
 			switch child := val.(type) {
 			case map[string]interface{}:
-				subPath := strings.TrimSpace(fmt.Sprintf("%s %s", currentPath, cleanKey))
+				hasChildren = true
+				subPath := joinPathTokens(cleanCurrentPath, cleanKey)
 				lines = append(lines, JSONToFlatCLI(child, subPath)...)
 			case []interface{}:
-				subPath := strings.TrimSpace(fmt.Sprintf("%s %s", currentPath, cleanKey))
+				hasChildren = true
+				subPath := joinPathTokens(cleanCurrentPath, cleanKey)
 				lines = append(lines, JSONToFlatCLI(child, subPath)...)
 			default:
 				valStr := FormatScalarCLI(child)
 				if valStr != "" {
-					scalarLeaves = append(scalarLeaves, fmt.Sprintf("%s %s", cleanKey, valStr))
+					hasChildren = true
+					leafPath := joinPathTokens(cleanCurrentPath, cleanKey)
+					lines = append(lines, fmt.Sprintf("set / %s %s", leafPath, valStr))
 				}
 			}
 		}
 
-		if len(scalarLeaves) > 0 {
-			stmt := strings.TrimSpace(fmt.Sprintf("set / %s %s", currentPath, strings.Join(scalarLeaves, " ")))
-			// Clean extra spaces
-			stmt = strings.Join(strings.Fields(stmt), " ")
-			lines = append(lines, stmt)
-		} else if currentPath != "" && len(v) == 0 {
-			stmt := strings.TrimSpace(fmt.Sprintf("set / %s", currentPath))
-			stmt = strings.Join(strings.Fields(stmt), " ")
-			lines = append(lines, stmt)
+		if !hasChildren && cleanCurrentPath != "" && len(v) == 0 {
+			lines = append(lines, fmt.Sprintf("set / %s", cleanCurrentPath))
 		}
 
 	case []interface{}:
@@ -156,7 +225,7 @@ func JSONToFlatCLI(data interface{}, currentPath string) []string {
 			for _, item := range v {
 				formattedElems = append(formattedElems, FormatScalarCLI(item))
 			}
-			stmt := strings.TrimSpace(fmt.Sprintf("set / %s [ %s ]", currentPath, strings.Join(formattedElems, " ")))
+			stmt := fmt.Sprintf("set / %s [ %s ]", cleanCurrentPath, strings.Join(formattedElems, " "))
 			lines = append(lines, stmt)
 			return lines
 		}
@@ -164,21 +233,19 @@ func JSONToFlatCLI(data interface{}, currentPath string) []string {
 		for _, item := range v {
 			switch child := item.(type) {
 			case map[string]interface{}:
-				keyPart, consumedKeys := extractListKeyCLI(currentPath, child)
-				var subPath string
-				if keyPart != "" {
-					subPath = strings.TrimSpace(fmt.Sprintf("%s %s", currentPath, keyPart))
-				} else {
-					subPath = currentPath
-				}
+				keyPart, consumedKeys := extractListKeyCLI(cleanCurrentPath, child)
+				subPath := joinPathTokens(cleanCurrentPath, keyPart)
 
 				// Create the remaining leaves without re-emitting the consumed keys
 				remainingMap := make(map[string]interface{}, len(child))
 				for ck, cv := range child {
 					cleanKey := StripNamespace(ck)
+					if strings.HasPrefix(cleanKey, "_") {
+						continue
+					}
 					consumed := false
 					for _, k := range consumedKeys {
-						if cleanKey == k {
+						if strings.EqualFold(cleanKey, StripNamespace(k)) {
 							consumed = true
 							break
 						}
@@ -189,28 +256,22 @@ func JSONToFlatCLI(data interface{}, currentPath string) []string {
 				}
 
 				if len(remainingMap) == 0 {
-					stmt := strings.TrimSpace(fmt.Sprintf("set / %s", subPath))
-					stmt = strings.Join(strings.Fields(stmt), " ")
-					lines = append(lines, stmt)
+					if subPath != "" {
+						lines = append(lines, fmt.Sprintf("set / %s", subPath))
+					}
 				} else {
 					lines = append(lines, JSONToFlatCLI(remainingMap, subPath)...)
 				}
 
 			default:
 				valStr := FormatScalarCLI(child)
-				stmt := strings.TrimSpace(fmt.Sprintf("set / %s %s", currentPath, valStr))
-				stmt = strings.Join(strings.Fields(stmt), " ")
-				lines = append(lines, stmt)
+				lines = append(lines, fmt.Sprintf("set / %s %s", cleanCurrentPath, valStr))
 			}
 		}
 	}
 
 	sort.Strings(lines)
 	return lines
-}
-
-func isListKey(k string) bool {
-	return schema.GetRegistry().IsListKey("", "", k, nil)
 }
 
 func extractListKeyCLI(currentPath string, m map[string]interface{}) (string, []string) {
@@ -222,12 +283,12 @@ func extractListKeyCLI(currentPath string, m map[string]interface{}) (string, []
 	return schema.GetRegistry().FormatListKeyCLI(currentPath, listName, m, FormatScalarCLI)
 }
 
-// FormatScalarCLI formats scalar values for flat CLI syntax.
+// FormatScalarCLI formats scalar values for flat CLI syntax without corrupting colon-containing strings.
 func FormatScalarCLI(v interface{}) string {
 	switch val := v.(type) {
 	case string:
-		cleanVal := StripNamespace(val)
-		if strings.Contains(cleanVal, " ") || strings.Contains(cleanVal, "\t") {
+		cleanVal := StripModulePrefixValue(val)
+		if cleanVal == "" || strings.ContainsAny(cleanVal, " \t\n\r\"") {
 			return fmt.Sprintf("%q", cleanVal)
 		}
 		return cleanVal

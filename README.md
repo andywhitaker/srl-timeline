@@ -18,12 +18,12 @@ A configuration timeline and version history tool for Nokia SR Linux using Git.
 
 ---
 
-## 1. Getting the Timeline Binary
+## 1. Getting or Building `srl-timeline`
 
-You can either download a pre-compiled binary or build it from source:
+You can either download a pre-built Debian package / binary or build from source:
 
-### Option A: Download Pre-compiled Binary (Recommended)
-Download the latest static Linux binary (`timeline`) from the [GitHub Releases](https://github.com/andywhitaker/srl-timeline/releases/latest) page on your local workstation.
+### Option A: Download Pre-built Package or Binary (Recommended)
+Download the latest Debian package (`srl-timeline_0.0.3_amd64.deb`) or static Linux binary (`timeline`) from the [GitHub Releases](https://github.com/andywhitaker/srl-timeline/releases/latest) page on your local workstation.
 
 ### Option B: Build from Source with Go
 `timeline` is written in pure Go and compiles to a single static binary with no external runtime dependencies:
@@ -33,36 +33,55 @@ Download the latest static Linux binary (`timeline`) from the [GitHub Releases](
 git clone https://github.com/andywhitaker/srl-timeline.git
 cd srl-timeline
 
-# Compile static binary
+# Build the Debian package (dist/srl-timeline_0.0.3_amd64.deb) and static binary (bin/timeline)
+make deb
+
+# Or compile only the static binary
 CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/timeline .
 ```
 
 ---
 
-## 2. Copy Timeline Binary to Switch
+## 2. Install on the SR Linux Switch
 
-Once you have the binary on your workstation, copy it to the switch's `/tmp` directory and move it into `/usr/local/bin`:
+### Method A: Debian Package Installation (Recommended)
+The `.deb` package installs `/usr/local/bin/timeline`, `/etc/opt/srlinux/appmgr/timeline_config.yml`, and `/etc/sudoers.d/srl-timeline`, sets up multi-user repository permissions under `/etc/opt/srlinux/timeline`, and automatically reloads `app_mgr`:
 
-### Step 1: SCP to the switch
-From your local workstation, copy the binary to `/tmp` on the SR Linux switch:
 ```bash
-scp timeline admin@<switch-ip>:/tmp/timeline
+# 1. Copy the package from your workstation to the switch
+scp dist/srl-timeline_0.0.3_amd64.deb admin@<switch-ip>:/tmp/
+
+# 2. Install on the switch (from Linux bash or via 'bash' in sr_cli)
+sudo dpkg -i /tmp/srl-timeline_0.0.3_amd64.deb
 ```
 
-### Step 2: Log into the switch and install
-Log into the switch, move the binary to `/usr/local/bin`, and make it executable:
+### Method B: Manual Binary & App Manager Installation
+If you are installing the standalone binary manually, copy both `timeline` and `timeline_config.yml` to the switch so `app_mgr` runs the background recorder daemon:
+
+#### Step 1: SCP to the switch
+From your local workstation, copy the binary and `app_mgr` configuration to `/tmp` on the SR Linux switch:
+```bash
+scp bin/timeline timeline_config.yml admin@<switch-ip>:/tmp/
+```
+
+#### Step 2: Log into the switch, install, and reload `app_mgr`
+Log into the switch, move the binary to `/usr/local/bin`, install `timeline_config.yml` into `/etc/opt/srlinux/appmgr/`, and reload `app_mgr`:
 
 - **From the SR Linux CLI**:
   ```text
   --{ running }--[  ]--
   A:srl-timeline# bash sudo mv /tmp/timeline /usr/local/bin/timeline
   A:srl-timeline# bash sudo chmod +x /usr/local/bin/timeline
+  A:srl-timeline# bash sudo mv /tmp/timeline_config.yml /etc/opt/srlinux/appmgr/timeline_config.yml
+  A:srl-timeline# tools system app-management application app_mgr reload
   ```
 
 - **From the Linux Bash Shell** (if logged into bash directly):
   ```bash
   sudo mv /tmp/timeline /usr/local/bin/timeline
   sudo chmod +x /usr/local/bin/timeline
+  sudo mv /tmp/timeline_config.yml /etc/opt/srlinux/appmgr/timeline_config.yml
+  sr_cli -d "tools system app-management application app_mgr reload"
   ```
 
 ---
@@ -95,10 +114,13 @@ timeline --filter "interface ethernet-1/1"
 
 ## Direct Download One-Liner (Optional)
 
-If your SR Linux switch has direct outbound internet access, you can download, install, and make it executable in a single command directly on the switch:
+If your SR Linux switch has direct outbound internet access, you can download and install the binary and `app_mgr` config directly on the switch:
 
 ```bash
-sudo curl -sL https://github.com/andywhitaker/srl-timeline/releases/latest/download/timeline -o /usr/local/bin/timeline && sudo chmod +x /usr/local/bin/timeline
+sudo curl -sL https://github.com/andywhitaker/srl-timeline/releases/latest/download/timeline -o /usr/local/bin/timeline && \
+sudo chmod +x /usr/local/bin/timeline && \
+sudo curl -sL https://raw.githubusercontent.com/andywhitaker/srl-timeline/main/timeline_config.yml -o /etc/opt/srlinux/appmgr/timeline_config.yml && \
+sr_cli -d "tools system app-management application app_mgr reload"
 ```
 
 ---

@@ -83,12 +83,45 @@ func (e *ConfigExporter) ExportAsFlatCLI(commitSHA, outputFile string) (string, 
 	return cliStr, nil
 }
 
-// SaveAsDeviceStartupConfig saves directly to /etc/opt/srlinux/config.json on the switch.
+// SaveAsDeviceStartupConfig saves the revision as the SR Linux startup configuration.
+// When saving the active/latest configuration on-box, it uses SR Linux's native "save startup"
+// command so /etc/opt/srlinux/config.json retains its _preamble, module prefixes, and POSIX ACLs.
 func (e *ConfigExporter) SaveAsDeviceStartupConfig(commitSHA string) (bool, string, error) {
 	targetFile := "/etc/opt/srlinux/config.json"
-	_, err := e.ExportAsStartupJSON(commitSHA, targetFile)
+
+	isLatest := commitSHA == "" || commitSHA == "HEAD" || commitSHA == "running" || commitSHA == "live"
+	if !isLatest && e.GitBackend != nil {
+		headSHA := e.GitBackend.GetHeadSHA()
+		if headSHA != "" && (commitSHA == headSHA || (len(commitSHA) >= 7 && len(headSHA) >= len(commitSHA) && headSHA[:len(commitSHA)] == commitSHA)) {
+			isLatest = true
+		}
+	}
+
+	if isLatest && e.SRLClient != nil && e.SRLClient.IsOnBox {
+		if ok, _, err := e.SRLClient.ExecuteCLI([]string{"save startup"}); err == nil && ok {
+			return true, fmt.Sprintf("Successfully saved revision %s as device startup config (%s)", commitSHA, targetFile), nil
+		}
+	}
+
+	// For historical revisions or off-box fallback, write JSON while preserving existing file mode/ACLs if present
+	cfg := e.GetConfigDict(commitSHA)
+	jsonStr, err := normalizer.CanonicalJSONString(cfg, 2)
+	if err != nil {
+		return false, "", fmt.Errorf("failed to serialize startup config: %w", err)
+	}
+
+	_ = os.MkdirAll(filepath.Dir(targetFile), 0755)
+	f, err := os.OpenFile(targetFile, os.O_WRONLY|os.O_TRUNC|os.O_CREATE, 0664)
 	if err != nil {
 		return false, "", fmt.Errorf("failed to write startup config: %w", err)
+	}
+	_, writeErr := f.Write([]byte(jsonStr))
+	closeErr := f.Close()
+	if writeErr != nil {
+		return false, "", fmt.Errorf("failed to write startup config: %w", writeErr)
+	}
+	if closeErr != nil {
+		return false, "", fmt.Errorf("failed to close startup config: %w", closeErr)
 	}
 	return true, fmt.Sprintf("Successfully saved revision %s as device startup config (%s)", commitSHA, targetFile), nil
 }

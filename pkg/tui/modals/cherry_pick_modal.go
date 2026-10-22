@@ -11,6 +11,7 @@ import (
 
 	"timeline/pkg/models"
 	"timeline/pkg/normalizer"
+	"timeline/pkg/schema"
 )
 
 // CommonSubtrees provides quick selectable items for SR Linux configuration.
@@ -155,10 +156,24 @@ func insertStepsIntoTree(rootMap map[string]*TreeNode, rootOrder *[]string, step
 		}
 		rootMap[rootKey] = rootNode
 		*rootOrder = append(*rootOrder, rootKey)
+	} else if len(steps) > 1 {
+		rootNode.IsLeaf = false
+	}
+
+	if len(steps) == 1 {
+		if len(rootNode.Children) == 0 {
+			rootNode.DiffType = ch.DiffType
+			rootNode.OldValue = ch.OldValue
+			rootNode.NewValue = ch.NewValue
+		} else {
+			rootNode.IsLeaf = false
+		}
+		return
 	}
 
 	curr := rootNode
 	for i := 1; i < len(steps); i++ {
+		curr.IsLeaf = false
 		step := steps[i]
 		isLast := (i == len(steps) - 1)
 
@@ -183,18 +198,112 @@ func insertStepsIntoTree(rootMap map[string]*TreeNode, rootOrder *[]string, step
 		}
 
 		if isLast {
-			child.IsLeaf = true
+			if len(child.Children) == 0 {
+				child.IsLeaf = true
+			} else {
+				child.IsLeaf = false
+			}
 			child.DiffType = ch.DiffType
 			child.OldValue = ch.OldValue
 			child.NewValue = ch.NewValue
+		} else {
+			child.IsLeaf = false
 		}
 
 		curr = child
 	}
 }
 
+// expandCompositeChange expands a PathChange whose value is a map or keyed list into leaf PathChanges
+// so added/deleted containers and lists can be expanded and cherry-picked at any granularity.
+func expandCompositeChange(basePath string, diffType models.DiffType, val interface{}, out *[]models.PathChange) {
+	switch v := val.(type) {
+	case map[string]interface{}:
+		var keys []string
+		for k := range v {
+			cleanK := normalizer.StripNamespace(k)
+			if !strings.HasPrefix(cleanK, "_") {
+				keys = append(keys, k)
+			}
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			cleanK := normalizer.StripNamespace(k)
+			subPath := fmt.Sprintf("%s/%s", basePath, cleanK)
+			expandCompositeChange(subPath, diffType, v[k], out)
+		}
+	case []interface{}:
+		if len(v) == 0 {
+			return
+		}
+		if _, isMap := v[0].(map[string]interface{}); !isMap {
+			// Scalar leaf-list
+			ch := models.PathChange{Path: basePath, DiffType: diffType}
+			if diffType == models.DiffDeleted {
+				ch.OldValue = v
+			} else {
+				ch.NewValue = v
+			}
+			*out = append(*out, ch)
+			return
+		}
+		listName := ""
+		if idx := strings.LastIndex(basePath, "/"); idx != -1 {
+			listName = basePath[idx+1:]
+		}
+		for _, item := range v {
+			itemMap, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			keys := schema.GetRegistry().GetListKeys(basePath, listName, itemMap)
+			var keyParts []string
+			consumed := make(map[string]bool)
+			for _, lk := range keys {
+				for ik, iv := range itemMap {
+					if strings.EqualFold(normalizer.StripNamespace(ik), lk) {
+						keyParts = append(keyParts, fmt.Sprintf("%s=%v", lk, iv))
+						consumed[strings.ToLower(normalizer.StripNamespace(ik))] = true
+						break
+					}
+				}
+			}
+			itemPath := basePath
+			if len(keyParts) > 0 {
+				itemPath = fmt.Sprintf("%s[%s]", basePath, strings.Join(keyParts, "]["))
+			}
+			remaining := make(map[string]interface{})
+			for ik, iv := range itemMap {
+				cleanIK := strings.ToLower(normalizer.StripNamespace(ik))
+				if !consumed[cleanIK] && !strings.HasPrefix(cleanIK, "_") {
+					remaining[ik] = iv
+				}
+			}
+			if len(remaining) == 0 {
+				ch := models.PathChange{Path: itemPath, DiffType: diffType}
+				if diffType == models.DiffDeleted {
+					ch.OldValue = itemMap
+				} else {
+					ch.NewValue = itemMap
+				}
+				*out = append(*out, ch)
+			} else {
+				expandCompositeChange(itemPath, diffType, remaining, out)
+			}
+		}
+	default:
+		ch := models.PathChange{Path: basePath, DiffType: diffType}
+		if diffType == models.DiffDeleted {
+			ch.OldValue = val
+		} else {
+			ch.NewValue = val
+		}
+		*out = append(*out, ch)
+	}
+}
+
 func countTreeChanges(node *TreeNode) int {
-	if node.IsLeaf {
+	if node.IsLeaf || len(node.Children) == 0 {
 		node.ChangeCount = 1
 		return 1
 	}
@@ -212,6 +321,21 @@ func buildTree(changes []models.PathChange, config map[string]interface{}) []*Tr
 
 	if len(changes) > 0 {
 		for _, ch := range changes {
+			val := ch.NewValue
+			if ch.DiffType == models.DiffDeleted {
+				val = ch.OldValue
+			}
+			if listVal, isList := val.([]interface{}); isList && len(listVal) > 0 {
+				if _, isMap := listVal[0].(map[string]interface{}); isMap {
+					var expanded []models.PathChange
+					expandCompositeChange(ch.Path, ch.DiffType, listVal, &expanded)
+					for _, subCh := range expanded {
+						steps := parsePathSteps(subCh.Path)
+						insertStepsIntoTree(rootMap, &rootOrder, steps, subCh)
+					}
+					continue
+				}
+			}
 			steps := parsePathSteps(ch.Path)
 			insertStepsIntoTree(rootMap, &rootOrder, steps, ch)
 		}
@@ -323,6 +447,13 @@ func (m *CherryPickModalModel) toggleSelectCurrent() {
 	}
 
 	setNodeChecked(node, newChecked)
+
+	// If a child node is unchecked, uncheck ancestor containers so the parent path does not override the unchecked child
+	if !newChecked {
+		for p := node.Parent; p != nil; p = p.Parent {
+			delete(m.SelectedPaths, p.FullPath)
+		}
+	}
 }
 
 func (m *CherryPickModalModel) toggleSelectAll() {
@@ -368,6 +499,42 @@ func (m CherryPickModalModel) GetSelectedPaths() []string {
 	return nil
 }
 
+func (m *CherryPickModalModel) visibleRowsCount() int {
+	modalHeight := m.Height - 4
+	if modalHeight < 16 {
+		modalHeight = 16
+	}
+	if modalHeight > 30 {
+		modalHeight = 30
+	}
+	visibleRows := modalHeight - 13
+	if visibleRows < 5 {
+		visibleRows = 5
+	}
+	return visibleRows
+}
+
+func (m *CherryPickModalModel) syncScrollOffset() {
+	visibleRows := m.visibleRowsCount()
+	totalVisible := len(m.VisibleNodes)
+	if m.SelectedIndex < m.ScrollOffset {
+		m.ScrollOffset = m.SelectedIndex
+	}
+	if m.SelectedIndex >= m.ScrollOffset+visibleRows {
+		m.ScrollOffset = m.SelectedIndex - visibleRows + 1
+	}
+	if m.ScrollOffset > totalVisible-visibleRows {
+		maxOffset := totalVisible - visibleRows
+		if maxOffset < 0 {
+			maxOffset = 0
+		}
+		m.ScrollOffset = maxOffset
+	}
+	if m.ScrollOffset < 0 {
+		m.ScrollOffset = 0
+	}
+}
+
 func (m *CherryPickModalModel) expandCurrent() {
 	if len(m.VisibleNodes) == 0 || m.SelectedIndex >= len(m.VisibleNodes) {
 		return
@@ -383,6 +550,7 @@ func (m *CherryPickModalModel) expandCurrent() {
 			}
 		}
 	}
+	m.syncScrollOffset()
 }
 
 func (m *CherryPickModalModel) collapseCurrent() {
@@ -401,6 +569,7 @@ func (m *CherryPickModalModel) collapseCurrent() {
 			}
 		}
 	}
+	m.syncScrollOffset()
 }
 
 func (m *CherryPickModalModel) toggleExpandAll() {
@@ -433,6 +602,7 @@ func (m *CherryPickModalModel) toggleExpandAll() {
 			m.SelectedIndex = 0
 		}
 	}
+	m.syncScrollOffset()
 }
 
 // View renders the cherry-pick subtree selection dialog with interactive tree, checkboxes, and scrolling.
@@ -445,18 +615,7 @@ func (m CherryPickModalModel) View() string {
 		modalWidth = 98
 	}
 
-	modalHeight := m.Height - 4
-	if modalHeight < 16 {
-		modalHeight = 16
-	}
-	if modalHeight > 30 {
-		modalHeight = 30
-	}
-
-	visibleRows := modalHeight - 13
-	if visibleRows < 5 {
-		visibleRows = 5
-	}
+	visibleRows := m.visibleRowsCount()
 
 	title := lipgloss.NewStyle().
 		Bold(true).
@@ -613,12 +772,14 @@ func (m CherryPickModalModel) View() string {
 		summaryTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#58a6ff")).Render("Custom XPath: " + m.CustomInput.Value())
 		summaryScope = "Applies manually entered XPath"
 	} else if selectedCount > 0 {
-		var samplePaths []string
+		var sortedSelected []string
 		for p := range m.SelectedPaths {
-			samplePaths = append(samplePaths, p)
-			if len(samplePaths) >= 2 {
-				break
-			}
+			sortedSelected = append(sortedSelected, p)
+		}
+		sort.Strings(sortedSelected)
+		samplePaths := sortedSelected
+		if len(samplePaths) > 2 {
+			samplePaths = samplePaths[:2]
 		}
 		summaryTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#3fb950")).Render(fmt.Sprintf("%d items selected (%s...)", selectedCount, strings.Join(samplePaths, ", ")))
 		summaryScope = fmt.Sprintf("Restores all %d selected paths together atomically in a single candidate commit", selectedCount)
@@ -669,7 +830,6 @@ func (m CherryPickModalModel) View() string {
 
 // Update processes cherry-pick selection key and mouse events.
 func (m CherryPickModalModel) Update(msg tea.Msg) (CherryPickModalModel, []string, bool) {
-	// Returns (model, selectedSubtrees, close)
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -688,12 +848,14 @@ func (m CherryPickModalModel) Update(msg tea.Msg) (CherryPickModalModel, []strin
 		case "up", "k":
 			if !m.UseCustom && m.SelectedIndex > 0 {
 				m.SelectedIndex--
+				m.syncScrollOffset()
 			}
 			return m, nil, false
 
 		case "down", "j":
 			if !m.UseCustom && m.SelectedIndex < len(m.VisibleNodes)-1 {
 				m.SelectedIndex++
+				m.syncScrollOffset()
 			}
 			return m, nil, false
 
@@ -733,6 +895,7 @@ func (m CherryPickModalModel) Update(msg tea.Msg) (CherryPickModalModel, []strin
 				if m.SelectedIndex < 0 {
 					m.SelectedIndex = 0
 				}
+				m.syncScrollOffset()
 			}
 			return m, nil, false
 
@@ -746,18 +909,21 @@ func (m CherryPickModalModel) Update(msg tea.Msg) (CherryPickModalModel, []strin
 						m.SelectedIndex = 0
 					}
 				}
+				m.syncScrollOffset()
 			}
 			return m, nil, false
 
 		case "home", "g":
 			if !m.UseCustom {
 				m.SelectedIndex = 0
+				m.syncScrollOffset()
 			}
 			return m, nil, false
 
 		case "end", "G":
 			if !m.UseCustom && len(m.VisibleNodes) > 0 {
 				m.SelectedIndex = len(m.VisibleNodes) - 1
+				m.syncScrollOffset()
 			}
 			return m, nil, false
 
@@ -774,11 +940,13 @@ func (m CherryPickModalModel) Update(msg tea.Msg) (CherryPickModalModel, []strin
 		case tea.MouseWheelUp:
 			if !m.UseCustom && m.SelectedIndex > 0 {
 				m.SelectedIndex--
+				m.syncScrollOffset()
 			}
 			return m, nil, false
 		case tea.MouseWheelDown:
 			if !m.UseCustom && m.SelectedIndex < len(m.VisibleNodes)-1 {
 				m.SelectedIndex++
+				m.syncScrollOffset()
 			}
 			return m, nil, false
 		}
@@ -792,5 +960,3 @@ func (m CherryPickModalModel) Update(msg tea.Msg) (CherryPickModalModel, []strin
 
 	return m, nil, false
 }
-
-

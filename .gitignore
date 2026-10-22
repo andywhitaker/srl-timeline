@@ -28,12 +28,16 @@ build/
 # Wheels
 wheels/
 
-# IDE & OS
+# IDE, Agent Metadata & OS
+.agent/
+.gemini/
 .idea/
 .vscode/
 *.swp
 *~
 .DS_Store
+*.log
+*.deb
 
 # Keys & Certificates
 *.pub

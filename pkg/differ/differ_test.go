@@ -1,6 +1,7 @@
 package differ
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -182,3 +183,107 @@ func TestSemanticDiffWithInterfaceFilter(t *testing.T) {
 	}
 }
 
+func TestSemanticDiffCompoundKeyACLNoCollision(t *testing.T) {
+	cfg1 := map[string]interface{}{
+		"acl": map[string]interface{}{
+			"acl-filter": []interface{}{
+				map[string]interface{}{
+					"name":        "cpm",
+					"type":        "ipv4",
+					"description": "IPv4 Old",
+				},
+				map[string]interface{}{
+					"name":        "cpm",
+					"type":        "ipv6",
+					"description": "IPv6 Unchanged",
+				},
+			},
+		},
+	}
+	cfg2 := map[string]interface{}{
+		"acl": map[string]interface{}{
+			"acl-filter": []interface{}{
+				map[string]interface{}{
+					"name":        "cpm",
+					"type":        "ipv4",
+					"description": "IPv4 New",
+				},
+				map[string]interface{}{
+					"name":        "cpm",
+					"type":        "ipv6",
+					"description": "IPv6 Unchanged",
+				},
+			},
+		},
+	}
+
+	res := SemanticDiff(cfg1, cfg2, "")
+	if len(res.Changes) != 1 {
+		t.Fatalf("expected exactly 1 change (ipv4 description only), got %d: %+v", len(res.Changes), res.Changes)
+	}
+	wantPath := "/acl/acl-filter[name=cpm][type=ipv4]/description"
+	if res.Changes[0].Path != wantPath {
+		t.Fatalf("expected path %q, got %q", wantPath, res.Changes[0].Path)
+	}
+}
+
+func TestComputeLCSDiffLargeSlice(t *testing.T) {
+	const total = 4000
+	a := make([]string, total)
+	b := make([]string, total)
+	for i := 0; i < total; i++ {
+		line := fmt.Sprintf("set / interface ethernet-1/%d admin-state enable", i)
+		a[i] = line
+		b[i] = line
+	}
+	b[1500] = "set / interface ethernet-1/1500 admin-state disable"
+	b[2500] = "set / interface ethernet-1/2500 admin-state disable"
+
+	ops := computeLCSDiff(a, b)
+	var dels, adds int
+	for _, op := range ops {
+		if op.op == diffDelete {
+			dels++
+		} else if op.op == diffInsert {
+			adds++
+		}
+	}
+	if dels != 2 || adds != 2 {
+		t.Fatalf("expected 2 deletions and 2 additions in 4000-line diff, got dels=%d adds=%d", dels, adds)
+	}
+}
+
+func TestSemanticDiffAddedAndDeletedTopLevelList(t *testing.T) {
+	oldCfg := map[string]interface{}{
+		"system": map[string]interface{}{
+			"name": map[string]interface{}{"host-name": "srl"},
+		},
+	}
+	newCfg := map[string]interface{}{
+		"system": map[string]interface{}{
+			"name": map[string]interface{}{"host-name": "srl"},
+		},
+		"interface": []interface{}{
+			map[string]interface{}{
+				"name":        "ethernet-1/1",
+				"admin-state": "enable",
+				"description": "Uplink",
+			},
+		},
+	}
+
+	resAdd := SemanticDiff(oldCfg, newCfg, "ethernet-1/1")
+	if !resAdd.HasChanges || len(resAdd.Changes) == 0 {
+		t.Fatalf("expected filtered changes for newly added top-level interface list, got %+v", resAdd.Changes)
+	}
+	for _, ch := range resAdd.Changes {
+		if strings.HasSuffix(ch.Path, "/name") {
+			t.Fatalf("consumed list key leaf /name must not be emitted as separate change: %+v", ch)
+		}
+	}
+
+	resDel := SemanticDiff(newCfg, oldCfg, "ethernet-1/1")
+	if !resDel.HasChanges || len(resDel.Changes) == 0 {
+		t.Fatalf("expected filtered changes for deleted top-level interface list, got %+v", resDel.Changes)
+	}
+}

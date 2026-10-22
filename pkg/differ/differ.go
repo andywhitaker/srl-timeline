@@ -10,14 +10,21 @@ import (
 	"timeline/pkg/filter"
 	"timeline/pkg/models"
 	"timeline/pkg/normalizer"
+	"timeline/pkg/schema"
 )
 
 // SemanticDiff compares two configurations and returns a SemanticDiffResult.
 func SemanticDiff(oldCfg, newCfg map[string]interface{}, filterPath string) models.SemanticDiffResult {
-	normOld := normalizer.NormalizeStructure(oldCfg, true).(map[string]interface{})
-	normNew := normalizer.NormalizeStructure(newCfg, true).(map[string]interface{})
+	normOld, _ := normalizer.NormalizeStructure(oldCfg, true).(map[string]interface{})
+	if normOld == nil {
+		normOld = make(map[string]interface{})
+	}
+	normNew, _ := normalizer.NormalizeStructure(newCfg, true).(map[string]interface{})
+	if normNew == nil {
+		normNew = make(map[string]interface{})
+	}
 
-	cleanFilter := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(filterPath, "/")))
+	cleanFilter := strings.TrimSpace(filterPath)
 
 	var changes []models.PathChange
 	diffJSONTrees("", normOld, normNew, &changes)
@@ -25,13 +32,17 @@ func SemanticDiff(oldCfg, newCfg map[string]interface{}, filterPath string) mode
 	// Filter changes if filterPath is supplied
 	var filteredChanges []models.PathChange
 	for _, c := range changes {
-		if cleanFilter == "" || strings.Contains(strings.ToLower(c.Path), cleanFilter) {
+		if cleanFilter == "" || filter.IsPathMatching(c.Path, cleanFilter) {
 			filteredChanges = append(filteredChanges, c)
 		}
 	}
 
 	var added, modified, deleted int
-	for _, c := range filteredChanges {
+	for i, c := range filteredChanges {
+		if (c.DiffType == models.DiffAdded || c.DiffType == models.DiffDeleted) &&
+			i+1 < len(filteredChanges) && strings.HasPrefix(filteredChanges[i+1].Path, c.Path+"/") {
+			continue
+		}
 		switch c.DiffType {
 		case models.DiffAdded:
 			added++
@@ -73,36 +84,153 @@ func SemanticDiff(oldCfg, newCfg map[string]interface{}, filterPath string) mode
 	}
 }
 
+// SemanticDiffFast computes structural PathChanges and CLIDiffLines without serializing full JSON unified diffs.
+func SemanticDiffFast(oldCfg, newCfg map[string]interface{}) models.SemanticDiffResult {
+	normOld, _ := normalizer.NormalizeStructure(oldCfg, true).(map[string]interface{})
+	if normOld == nil {
+		normOld = make(map[string]interface{})
+	}
+	normNew, _ := normalizer.NormalizeStructure(newCfg, true).(map[string]interface{})
+	if normNew == nil {
+		normNew = make(map[string]interface{})
+	}
+
+	var changes []models.PathChange
+	diffJSONTrees("", normOld, normNew, &changes)
+
+	var added, modified, deleted int
+	for i, c := range changes {
+		if (c.DiffType == models.DiffAdded || c.DiffType == models.DiffDeleted) &&
+			i+1 < len(changes) && strings.HasPrefix(changes[i+1].Path, c.Path+"/") {
+			continue
+		}
+		switch c.DiffType {
+		case models.DiffAdded:
+			added++
+		case models.DiffModified:
+			modified++
+		case models.DiffDeleted:
+			deleted++
+		}
+	}
+
+	oldCLI := normalizer.JSONToFlatCLI(normOld, "")
+	newCLI := normalizer.JSONToFlatCLI(normNew, "")
+	cliDiff := generateCLIDiff(oldCLI, newCLI, "")
+
+	return models.SemanticDiffResult{
+		HasChanges:    len(changes) > 0 || len(cliDiff) > 0,
+		AddedCount:    added,
+		ModifiedCount: modified,
+		DeletedCount:  deleted,
+		Changes:       changes,
+		CLIDiffLines:  cliDiff,
+	}
+}
+
+func isConsumedListKeyField(currentPath, fieldName string, itemMap map[string]interface{}) bool {
+	if !strings.HasSuffix(currentPath, "]") {
+		return false
+	}
+	listName := ""
+	if idx := strings.LastIndex(currentPath, "/"); idx != -1 {
+		listName = currentPath[idx+1:]
+		if bIdx := strings.Index(listName, "["); bIdx != -1 {
+			listName = listName[:bIdx]
+		}
+	}
+	cleanField := normalizer.StripNamespace(fieldName)
+	keys := schema.GetRegistry().GetListKeys(currentPath, listName, itemMap)
+	for _, k := range keys {
+		if strings.EqualFold(cleanField, k) {
+			return true
+		}
+	}
+	return false
+}
+
 func diffJSONTrees(currentPath string, oldVal, newVal interface{}, changes *[]models.PathChange) {
 	if reflect.DeepEqual(oldVal, newVal) {
 		return
 	}
 
 	if oldVal == nil && newVal != nil {
+		if list, ok := newVal.([]interface{}); ok && len(list) > 0 {
+			if _, isMap := list[0].(map[string]interface{}); isMap {
+				newKeyed := makeKeyedListMap(currentPath, list)
+				var sortedListKeys []string
+				for k := range newKeyed {
+					sortedListKeys = append(sortedListKeys, k)
+				}
+				sort.Strings(sortedListKeys)
+				for _, lk := range sortedListKeys {
+					itemSubPath := currentPath
+					if lk != "" {
+						itemSubPath = fmt.Sprintf("%s[%s]", currentPath, lk)
+					}
+					diffJSONTrees(itemSubPath, nil, newKeyed[lk], changes)
+				}
+				return
+			}
+		}
 		*changes = append(*changes, models.PathChange{
 			Path:     currentPath,
 			DiffType: models.DiffAdded,
 			NewValue: newVal,
 		})
 		if m, ok := newVal.(map[string]interface{}); ok {
-			for k, v := range m {
+			var sortedKeys []string
+			for k := range m {
+				if isConsumedListKeyField(currentPath, k, m) {
+					continue
+				}
+				sortedKeys = append(sortedKeys, k)
+			}
+			sort.Strings(sortedKeys)
+			for _, k := range sortedKeys {
 				subPath := fmt.Sprintf("%s/%s", currentPath, k)
-				diffJSONTrees(subPath, nil, v, changes)
+				diffJSONTrees(subPath, nil, m[k], changes)
 			}
 		}
 		return
 	}
 
 	if oldVal != nil && newVal == nil {
+		if list, ok := oldVal.([]interface{}); ok && len(list) > 0 {
+			if _, isMap := list[0].(map[string]interface{}); isMap {
+				oldKeyed := makeKeyedListMap(currentPath, list)
+				var sortedListKeys []string
+				for k := range oldKeyed {
+					sortedListKeys = append(sortedListKeys, k)
+				}
+				sort.Strings(sortedListKeys)
+				for _, lk := range sortedListKeys {
+					itemSubPath := currentPath
+					if lk != "" {
+						itemSubPath = fmt.Sprintf("%s[%s]", currentPath, lk)
+					}
+					diffJSONTrees(itemSubPath, oldKeyed[lk], nil, changes)
+				}
+				return
+			}
+		}
 		*changes = append(*changes, models.PathChange{
 			Path:     currentPath,
 			DiffType: models.DiffDeleted,
 			OldValue: oldVal,
 		})
 		if m, ok := oldVal.(map[string]interface{}); ok {
-			for k, v := range m {
+			var sortedKeys []string
+			for k := range m {
+				if isConsumedListKeyField(currentPath, k, m) {
+					continue
+				}
+				sortedKeys = append(sortedKeys, k)
+			}
+			sort.Strings(sortedKeys)
+			for _, k := range sortedKeys {
 				subPath := fmt.Sprintf("%s/%s", currentPath, k)
-				diffJSONTrees(subPath, v, nil, changes)
+				diffJSONTrees(subPath, m[k], nil, changes)
 			}
 		}
 		return
@@ -142,9 +270,8 @@ func diffJSONTrees(currentPath string, oldVal, newVal interface{}, changes *[]mo
 	newList, newIsList := newVal.([]interface{})
 
 	if oldIsList && newIsList {
-		// Compare keyed lists
-		oldKeyed := makeKeyedListMap(oldList)
-		newKeyed := makeKeyedListMap(newList)
+		oldKeyed := makeKeyedListMap(currentPath, oldList)
+		newKeyed := makeKeyedListMap(currentPath, newList)
 
 		allListKeys := make(map[string]bool)
 		for k := range oldKeyed {
@@ -181,14 +308,41 @@ func diffJSONTrees(currentPath string, oldVal, newVal interface{}, changes *[]mo
 	})
 }
 
-func makeKeyedListMap(list []interface{}) map[string]interface{} {
+func makeKeyedListMap(currentPath string, list []interface{}) map[string]interface{} {
 	m := make(map[string]interface{}, len(list))
+	listName := ""
+	if idx := strings.LastIndex(currentPath, "/"); idx != -1 {
+		listName = currentPath[idx+1:]
+		if bIdx := strings.Index(listName, "["); bIdx != -1 {
+			listName = listName[:bIdx]
+		}
+	}
+
 	for idx, item := range list {
 		if elemMap, ok := item.(map[string]interface{}); ok {
+			keys := schema.GetRegistry().GetListKeys(currentPath, listName, elemMap)
+			if len(keys) > 0 {
+				var keyParts []string
+				for _, k := range keys {
+					if val, found := elemMap[k]; found {
+						keyParts = append(keyParts, fmt.Sprintf("%s=%v", k, val))
+					}
+				}
+				if len(keyParts) == len(keys) {
+					m[strings.Join(keyParts, "][")] = item
+					continue
+				}
+			}
+
 			var keyVal string
 			for _, k := range normalizer.WellKnownListKeys {
 				if val, found := elemMap[k]; found {
-					keyVal = fmt.Sprintf("%s=%v", k, val)
+					switch val.(type) {
+					case map[string]interface{}, []interface{}:
+						continue
+					default:
+						keyVal = fmt.Sprintf("%s=%v", k, val)
+					}
 					break
 				}
 			}
@@ -215,23 +369,73 @@ type diffChunk struct {
 	line string
 }
 
+// computeLCSDiff computes a line diff with common prefix/suffix trimming and bounded memory.
 func computeLCSDiff(oldLines, newLines []string) []diffChunk {
 	n := len(oldLines)
 	m := len(newLines)
 
-	dp := make([][]int, n+1)
-	for i := range dp {
-		dp[i] = make([]int, m+1)
+	// 1. Trim common prefix lines in O(min(N, M))
+	prefixLen := 0
+	for prefixLen < n && prefixLen < m && oldLines[prefixLen] == newLines[prefixLen] {
+		prefixLen++
 	}
 
+	// 2. Trim common suffix lines in O(min(N, M))
+	suffixLen := 0
+	for suffixLen < (n-prefixLen) && suffixLen < (m-prefixLen) &&
+		oldLines[n-1-suffixLen] == newLines[m-1-suffixLen] {
+		suffixLen++
+	}
+
+	midOld := oldLines[prefixLen : n-suffixLen]
+	midNew := newLines[prefixLen : m-suffixLen]
+
+	var midChunks []diffChunk
+	if len(midOld) == 0 {
+		for _, l := range midNew {
+			midChunks = append(midChunks, diffChunk{op: diffInsert, line: l})
+		}
+	} else if len(midNew) == 0 {
+		for _, l := range midOld {
+			midChunks = append(midChunks, diffChunk{op: diffDelete, line: l})
+		}
+	} else if int64(len(midOld))*int64(len(midNew)) <= 250000 {
+		midChunks = computeSmallDPDiff(midOld, midNew)
+	} else {
+		midChunks = computeMyersDiff(midOld, midNew)
+	}
+
+	totalCap := prefixLen + len(midChunks) + suffixLen
+	result := make([]diffChunk, 0, totalCap)
+	for i := 0; i < prefixLen; i++ {
+		result = append(result, diffChunk{op: diffEqual, line: oldLines[i]})
+	}
+	result = append(result, midChunks...)
+	for i := n - suffixLen; i < n; i++ {
+		result = append(result, diffChunk{op: diffEqual, line: oldLines[i]})
+	}
+	return result
+}
+
+func computeSmallDPDiff(oldLines, newLines []string) []diffChunk {
+	n := len(oldLines)
+	m := len(newLines)
+
+	// Allocate a single flat backing slice instead of n+1 separate heap allocations
+	stride := m + 1
+	flat := make([]int32, (n+1)*stride)
+
 	for i := 1; i <= n; i++ {
+		row := i * stride
+		prevRow := (i - 1) * stride
+		oldLine := oldLines[i-1]
 		for j := 1; j <= m; j++ {
-			if oldLines[i-1] == newLines[j-1] {
-				dp[i][j] = dp[i-1][j-1] + 1
-			} else if dp[i-1][j] >= dp[i][j-1] {
-				dp[i][j] = dp[i-1][j]
+			if oldLine == newLines[j-1] {
+				flat[row+j] = flat[prevRow+j-1] + 1
+			} else if flat[prevRow+j] >= flat[row+j-1] {
+				flat[row+j] = flat[prevRow+j]
 			} else {
-				dp[i][j] = dp[i][j-1]
+				flat[row+j] = flat[row+j-1]
 			}
 		}
 	}
@@ -243,10 +447,10 @@ func computeLCSDiff(oldLines, newLines []string) []diffChunk {
 			chunks = append(chunks, diffChunk{op: diffEqual, line: oldLines[i-1]})
 			i--
 			j--
-		} else if j > 0 && (i == 0 || dp[i][j-1] >= dp[i-1][j]) {
+		} else if j > 0 && (i == 0 || flat[i*stride+j-1] >= flat[(i-1)*stride+j]) {
 			chunks = append(chunks, diffChunk{op: diffInsert, line: newLines[j-1]})
 			j--
-		} else if i > 0 && (j == 0 || dp[i-1][j] >= dp[i][j-1]) {
+		} else if i > 0 {
 			chunks = append(chunks, diffChunk{op: diffDelete, line: oldLines[i-1]})
 			i--
 		}
@@ -256,7 +460,99 @@ func computeLCSDiff(oldLines, newLines []string) []diffChunk {
 		opp := len(chunks) - 1 - k
 		chunks[k], chunks[opp] = chunks[opp], chunks[k]
 	}
+	return chunks
+}
 
+// computeMyersDiff implements Myers O(ND) diff with a safe maximum edit bound so large files never OOM.
+func computeMyersDiff(oldLines, newLines []string) []diffChunk {
+	n := len(oldLines)
+	m := len(newLines)
+	maxD := n + m
+	const maxEditBound = 2048
+	if maxD > maxEditBound {
+		maxD = maxEditBound
+	}
+
+	vSize := 2*maxD + 3
+	offset := maxD + 1
+	v := make([]int, vSize)
+	var trace [][]int
+
+	reached := false
+	for d := 0; d <= maxD; d++ {
+		snapshot := make([]int, vSize)
+		copy(snapshot, v)
+		trace = append(trace, snapshot)
+
+		for k := -d; k <= d; k += 2 {
+			var x int
+			if k == -d || (k != d && v[k-1+offset] < v[k+1+offset]) {
+				x = v[k+1+offset]
+			} else {
+				x = v[k-1+offset] + 1
+			}
+			y := x - k
+			for x < n && y < m && oldLines[x] == newLines[y] {
+				x++
+				y++
+			}
+			v[k+offset] = x
+			if x >= n && y >= m {
+				reached = true
+				break
+			}
+		}
+		if reached {
+			break
+		}
+	}
+
+	if !reached {
+		// Linear fallback when edit distance exceeds maxEditBound
+		chunks := make([]diffChunk, 0, n+m)
+		for _, l := range oldLines {
+			chunks = append(chunks, diffChunk{op: diffDelete, line: l})
+		}
+		for _, l := range newLines {
+			chunks = append(chunks, diffChunk{op: diffInsert, line: l})
+		}
+		return chunks
+	}
+
+	var chunks []diffChunk
+	x, y := n, m
+	for d := len(trace) - 1; d >= 0; d-- {
+		vPrev := trace[d]
+		k := x - y
+		var prevK int
+		if k == -d || (k != d && vPrev[k-1+offset] < vPrev[k+1+offset]) {
+			prevK = k + 1
+		} else {
+			prevK = k - 1
+		}
+		prevX := vPrev[prevK+offset]
+		prevY := prevX - prevK
+
+		for x > prevX && y > prevY {
+			chunks = append(chunks, diffChunk{op: diffEqual, line: oldLines[x-1]})
+			x--
+			y--
+		}
+		if d > 0 {
+			if x == prevX {
+				chunks = append(chunks, diffChunk{op: diffInsert, line: newLines[y-1]})
+				y--
+			} else {
+				chunks = append(chunks, diffChunk{op: diffDelete, line: oldLines[x-1]})
+				x--
+			}
+		}
+	}
+
+	for k := 0; k < len(chunks)/2; k++ {
+		opp := len(chunks) - 1 - k
+		chunks[k], chunks[opp] = chunks[opp], chunks[k]
+	}
 	return chunks
 }
 
@@ -338,7 +634,7 @@ func generateCLIDiff(oldCLI, newCLI []string, filterQuery string) []string {
 
 	for _, l := range oldCLI {
 		if !newSet[l] {
-			if filterQuery == "" || strings.Contains(strings.ToLower(l), filterQuery) {
+			if filterQuery == "" || filter.IsPathMatching(l, filterQuery) {
 				delStmt := strings.Replace(l, "set /", "- delete /", 1)
 				diffLines = append(diffLines, delStmt)
 			}
@@ -347,7 +643,7 @@ func generateCLIDiff(oldCLI, newCLI []string, filterQuery string) []string {
 
 	for _, l := range newCLI {
 		if !oldSet[l] {
-			if filterQuery == "" || strings.Contains(strings.ToLower(l), filterQuery) {
+			if filterQuery == "" || filter.IsPathMatching(l, filterQuery) {
 				addStmt := strings.Replace(l, "set /", "+ set /", 1)
 				diffLines = append(diffLines, addStmt)
 			}

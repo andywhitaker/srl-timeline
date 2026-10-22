@@ -772,3 +772,56 @@ func TestDiffViewLineWrappingColors(t *testing.T) {
 		}
 	}
 }
+
+func TestCherryPickModalDeselectChildUnchecksParent(t *testing.T) {
+	changes := []models.PathChange{
+		{Path: "/interface[name=ethernet-1/1]/description", DiffType: models.DiffModified, NewValue: "Port 1"},
+		{Path: "/interface[name=ethernet-1/2]/description", DiffType: models.DiffModified, NewValue: "Port 2"},
+	}
+	commit := models.TimelineCommit{CommitID: "abc12345", Message: "Test"}
+	cm := modals.NewCherryPickModal(commit, changes, nil, 120, 40)
+
+	// Expand all and select all
+	cm, _, _ = cm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	cm, _, _ = cm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+
+	// Move cursor down to [name=ethernet-1/2] and toggle it off
+	for i := 0; i < len(cm.VisibleNodes); i++ {
+		if cm.VisibleNodes[cm.SelectedIndex].FullPath == "/interface[name=ethernet-1/2]" {
+			break
+		}
+		cm, _, _ = cm.Update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	cm, _, _ = cm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+
+	paths := cm.GetSelectedPaths()
+	for _, p := range paths {
+		if p == "/interface" || strings.Contains(p, "ethernet-1/2") {
+			t.Fatalf("unchecking child must deselect parent /interface and ethernet-1/2, got selected paths: %v", paths)
+		}
+	}
+}
+
+func TestCherryPickModalCompositeListExpansion(t *testing.T) {
+	changes := []models.PathChange{
+		{
+			Path:     "/interface",
+			DiffType: models.DiffAdded,
+			NewValue: []interface{}{
+				map[string]interface{}{
+					"name":        "ethernet-1/1",
+					"admin-state": "enable",
+				},
+			},
+		},
+	}
+	commit := models.TimelineCommit{CommitID: "abc12345", Message: "Added interface list"}
+	cm := modals.NewCherryPickModal(commit, changes, nil, 120, 40)
+	if len(cm.RootNodes) != 1 {
+		t.Fatalf("expected 1 root node, got %d", len(cm.RootNodes))
+	}
+	if cm.RootNodes[0].IsLeaf || len(cm.RootNodes[0].Children) == 0 {
+		t.Fatalf("expected /interface root node to be expandable with children, got IsLeaf=%v Children=%d", cm.RootNodes[0].IsLeaf, len(cm.RootNodes[0].Children))
+	}
+}
+

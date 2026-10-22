@@ -76,3 +76,35 @@ func TestGitBackendRecordAndTimeline(t *testing.T) {
 		t.Fatalf("remote config mismatch: %+v", loaded)
 	}
 }
+
+func TestTimelineCachePreservesStartupAndRestoredFlags(t *testing.T) {
+	tempDir := t.TempDir()
+	repoDir := filepath.Join(tempDir, "repo")
+	backend1 := NewGitBackend(repoDir)
+
+	cfg1 := map[string]interface{}{"system": map[string]interface{}{"name": map[string]interface{}{"host-name": "srl1"}}}
+	cfg2 := map[string]interface{}{"system": map[string]interface{}{"name": map[string]interface{}{"host-name": "srl2"}}}
+
+	_, _, err := backend1.RecordConfigChange(cfg1, "system", "startup", "", time.Now().UTC(), "Startup baseline", map[string]interface{}{"is_startup": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = backend1.RecordConfigChange(cfg2, "admin", "10", "", time.Now().UTC(), "Restored revision", map[string]interface{}{"is_restored": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Open a fresh GitBackend instance to force reading from timeline_cache.json
+	backend2 := NewGitBackend(repoDir)
+	commits := backend2.GetTimeline(10, "")
+	if len(commits) != 2 {
+		t.Fatalf("expected 2 commits, got %d", len(commits))
+	}
+	if !commits[0].IsRestored {
+		t.Fatalf("expected latest commit IsRestored=true after cache reload, got %+v", commits[0])
+	}
+	if !commits[1].IsStartup {
+		t.Fatalf("expected initial commit IsStartup=true after cache reload, got %+v", commits[1])
+	}
+}
+
