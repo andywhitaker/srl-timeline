@@ -467,7 +467,11 @@ func FilterDiffResult(diffRes models.SemanticDiffResult, filterQuery string) mod
 	}
 
 	var added, modified, deleted int
-	for _, c := range filteredChanges {
+	for i, c := range filteredChanges {
+		if (c.DiffType == models.DiffAdded || c.DiffType == models.DiffDeleted) &&
+			i+1 < len(filteredChanges) && strings.HasPrefix(filteredChanges[i+1].Path, c.Path+"/") {
+			continue
+		}
 		switch c.DiffType {
 		case models.DiffAdded:
 			added++

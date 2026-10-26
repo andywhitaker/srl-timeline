@@ -45,7 +45,7 @@ CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/timeline .
 ## 2. Install on the SR Linux Switch
 
 ### Method A: Debian Package Installation (Recommended)
-The `.deb` package installs `/usr/local/bin/timeline`, `/etc/opt/srlinux/appmgr/timeline_config.yml`, and `/etc/sudoers.d/srl-timeline`, sets up multi-user repository permissions under `/etc/opt/srlinux/timeline`, and automatically reloads `app_mgr`:
+The `.deb` package installs `/usr/local/bin/timeline` and `/etc/opt/srlinux/appmgr/timeline_config.yml`, sets up multi-user repository permissions under `/etc/opt/srlinux/timeline`, enables the on-box JSON-RPC Unix domain socket (`/opt/srlinux/var/run/sr_json_rpc`), and automatically reloads `app_mgr`:
 
 ```bash
 # 1. Copy the package from your workstation to the switch
@@ -64,8 +64,8 @@ From your local workstation, copy the binary and `app_mgr` configuration to `/tm
 scp bin/timeline timeline_config.yml admin@<switch-ip>:/tmp/
 ```
 
-#### Step 2: Log into the switch, install, and reload `app_mgr`
-Log into the switch, move the binary to `/usr/local/bin`, install `timeline_config.yml` into `/etc/opt/srlinux/appmgr/`, and reload `app_mgr`:
+#### Step 2: Log into the switch, install, and bootstrap `timeline`
+Log into the switch, move the binary to `/usr/local/bin`, install `timeline_config.yml` into `/etc/opt/srlinux/appmgr/`, and bootstrap the daemon:
 
 - **From the SR Linux CLI**:
   ```text
@@ -73,7 +73,7 @@ Log into the switch, move the binary to `/usr/local/bin`, install `timeline_conf
   A:srl-timeline# bash sudo mv /tmp/timeline /usr/local/bin/timeline
   A:srl-timeline# bash sudo chmod +x /usr/local/bin/timeline
   A:srl-timeline# bash sudo mv /tmp/timeline_config.yml /etc/opt/srlinux/appmgr/timeline_config.yml
-  A:srl-timeline# tools system app-management application app_mgr reload
+  A:srl-timeline# bash sudo timeline daemon bootstrap
   ```
 
 - **From the Linux Bash Shell** (if logged into bash directly):
@@ -81,7 +81,7 @@ Log into the switch, move the binary to `/usr/local/bin`, install `timeline_conf
   sudo mv /tmp/timeline /usr/local/bin/timeline
   sudo chmod +x /usr/local/bin/timeline
   sudo mv /tmp/timeline_config.yml /etc/opt/srlinux/appmgr/timeline_config.yml
-  sr_cli -d "tools system app-management application app_mgr reload"
+  sudo timeline daemon bootstrap
   ```
 
 ---
@@ -120,7 +120,7 @@ If your SR Linux switch has direct outbound internet access, you can download an
 sudo curl -sL https://github.com/andywhitaker/srl-timeline/releases/latest/download/timeline -o /usr/local/bin/timeline && \
 sudo chmod +x /usr/local/bin/timeline && \
 sudo curl -sL https://raw.githubusercontent.com/andywhitaker/srl-timeline/main/timeline_config.yml -o /etc/opt/srlinux/appmgr/timeline_config.yml && \
-sr_cli -d "tools system app-management application app_mgr reload"
+sudo timeline daemon bootstrap
 ```
 
 ---

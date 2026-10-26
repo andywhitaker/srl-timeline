@@ -72,6 +72,58 @@ func (m *TimelineViewModel) Prev() {
 	}
 }
 
+// GotoTop moves selection to the first commit.
+func (m *TimelineViewModel) GotoTop() {
+	if len(m.Commits) > 0 && m.SelectedIndex != 0 {
+		m.SelectedIndex = 0
+		m.UpdateViewportContent()
+		m.ensureVisible()
+	}
+}
+
+// GotoBottom moves selection to the last commit.
+func (m *TimelineViewModel) GotoBottom() {
+	if len(m.Commits) > 0 && m.SelectedIndex != len(m.Commits)-1 {
+		m.SelectedIndex = len(m.Commits) - 1
+		m.UpdateViewportContent()
+		m.ensureVisible()
+	}
+}
+
+// PageUp moves selection up by a page of commits.
+func (m *TimelineViewModel) PageUp() {
+	if len(m.Commits) == 0 {
+		return
+	}
+	step := (m.Height - 1) / 3
+	if step < 1 {
+		step = 5
+	}
+	m.SelectedIndex -= step
+	if m.SelectedIndex < 0 {
+		m.SelectedIndex = 0
+	}
+	m.UpdateViewportContent()
+	m.ensureVisible()
+}
+
+// PageDown moves selection down by a page of commits.
+func (m *TimelineViewModel) PageDown() {
+	if len(m.Commits) == 0 {
+		return
+	}
+	step := (m.Height - 1) / 3
+	if step < 1 {
+		step = 5
+	}
+	m.SelectedIndex += step
+	if m.SelectedIndex >= len(m.Commits) {
+		m.SelectedIndex = len(m.Commits) - 1
+	}
+	m.UpdateViewportContent()
+	m.ensureVisible()
+}
+
 func (m *TimelineViewModel) ensureVisible() {
 	// Each commit occupies roughly 3 lines in the visual graph
 	targetY := m.SelectedIndex * 3
@@ -169,17 +221,30 @@ func (m *TimelineViewModel) UpdateViewportContent() {
 		}
 
 		headerLine := fmt.Sprintf("%s%s %s %s %s %s", cursor, nodeStyled, shaStyled, authorStyled, timeStyled, statStyled)
+		if m.Width > 0 && lipgloss.Width(headerLine) > m.Width {
+			headerLine = fmt.Sprintf("%s%s %s %s %s", cursor, nodeStyled, shaStyled, authorStyled, timeStyled)
+			if lipgloss.Width(headerLine) > m.Width {
+				headerLine = fmt.Sprintf("%s%s %s %s", cursor, nodeStyled, shaStyled, authorStyled)
+			}
+			if lipgloss.Width(headerLine) > m.Width {
+				headerLine = lipgloss.NewStyle().MaxWidth(m.Width).Render(headerLine)
+			}
+		}
 
 		// Format line 2: Connector + Message
 		connectorStyled := StyleTimelineLine.Render(connectorGlyph)
 		msgStr := c.Message
-		maxMsgLen := m.Width - 12
-		if maxMsgLen > 10 && len(msgStr) > maxMsgLen {
-			msgStr = msgStr[:maxMsgLen] + "…"
+		maxMsgLen := m.Width - 10
+		msgRunes := []rune(msgStr)
+		if maxMsgLen > 5 && len(msgRunes) > maxMsgLen {
+			msgStr = string(msgRunes[:maxMsgLen]) + "…"
 		}
 		msgStyled := lipgloss.NewStyle().Foreground(ColorText).Render(msgStr)
 
 		messageLine := fmt.Sprintf("    %s %s", connectorStyled, msgStyled)
+		if m.Width > 0 && lipgloss.Width(messageLine) > m.Width {
+			messageLine = lipgloss.NewStyle().MaxWidth(m.Width).Render(messageLine)
+		}
 
 		// Format line 3: Connector spacing
 		spacingLine := fmt.Sprintf("    %s", connectorStyled)

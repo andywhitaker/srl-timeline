@@ -25,6 +25,7 @@ func NewExportModal(commit models.TimelineCommit, width, height int) ExportModal
 	ti.Placeholder = "/tmp/exported_config.json"
 	ti.Prompt = "Output File: "
 	ti.Width = 45
+	ti.Focus()
 
 	return ExportModalModel{
 		Commit:    commit,
@@ -72,7 +73,7 @@ func (m ExportModalModel) View() string {
 	}
 
 	footer := lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")).Render(
-		"\n[1/2/3] Select Format  |  [Enter] Export  |  [Esc] Cancel",
+		"\n[1/2/3 or ↑/↓/Tab] Select Format  |  [Enter] Export  |  [Esc] Cancel",
 	)
 
 	content := fmt.Sprintf("%s\n\n%s\n\n%s\n%s\n%s\n\n%s\n%s", title, details, optJSON, optCLI, optStartup, pathView, footer)
@@ -96,14 +97,56 @@ func (m ExportModalModel) Update(msg tea.Msg) (ExportModalModel, string, string,
 		switch msg.String() {
 		case "esc":
 			return m, "", "", true
+		case "up", "shift+tab":
+			switch m.Format {
+			case "startup":
+				m.Format = "cli"
+				m.PathInput.Placeholder = "/tmp/exported_config.cli"
+				m.PathInput.Focus()
+			case "cli":
+				m.Format = "json"
+				m.PathInput.Placeholder = "/tmp/exported_config.json"
+				m.PathInput.Focus()
+			default:
+				m.Format = "startup"
+				m.PathInput.Blur()
+			}
+			return m, "", "", false
+		case "down", "tab":
+			switch m.Format {
+			case "json":
+				m.Format = "cli"
+				m.PathInput.Placeholder = "/tmp/exported_config.cli"
+				m.PathInput.Focus()
+			case "cli":
+				m.Format = "startup"
+				m.PathInput.Blur()
+			default:
+				m.Format = "json"
+				m.PathInput.Placeholder = "/tmp/exported_config.json"
+				m.PathInput.Focus()
+			}
+			return m, "", "", false
 		case "1":
-			m.Format = "json"
-			m.PathInput.Placeholder = "/tmp/exported_config.json"
+			if m.Format == "startup" || m.PathInput.Value() == "" {
+				m.Format = "json"
+				m.PathInput.Placeholder = "/tmp/exported_config.json"
+				m.PathInput.Focus()
+				return m, "", "", false
+			}
 		case "2":
-			m.Format = "cli"
-			m.PathInput.Placeholder = "/tmp/exported_config.cli"
+			if m.Format == "startup" || m.PathInput.Value() == "" {
+				m.Format = "cli"
+				m.PathInput.Placeholder = "/tmp/exported_config.cli"
+				m.PathInput.Focus()
+				return m, "", "", false
+			}
 		case "3":
-			m.Format = "startup"
+			if m.Format == "startup" || m.PathInput.Value() == "" {
+				m.Format = "startup"
+				m.PathInput.Blur()
+				return m, "", "", false
+			}
 		case "enter":
 			out := m.PathInput.Value()
 			if out == "" && m.Format != "startup" {

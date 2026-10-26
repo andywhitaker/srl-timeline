@@ -102,6 +102,10 @@ func parsePathSteps(path string) []stepInfo {
 		}
 
 		bracketIdx := strings.Index(tok, "[")
+		if bracketIdx != -1 && strings.HasPrefix(tok[bracketIdx:], "[idx_") {
+			tok = tok[:bracketIdx]
+			bracketIdx = -1
+		}
 		if bracketIdx != -1 {
 			prefix := tok[:bracketIdx]
 			keyPart := tok[bracketIdx:]
@@ -489,7 +493,20 @@ func (m CherryPickModalModel) GetSelectedPaths() []string {
 			paths = append(paths, p)
 		}
 		sort.Strings(paths)
-		return paths
+		var pruned []string
+		for _, p := range paths {
+			redundant := false
+			for _, parent := range pruned {
+				if strings.HasPrefix(p, parent+"/") || strings.HasPrefix(p, parent+"[") {
+					redundant = true
+					break
+				}
+			}
+			if !redundant {
+				pruned = append(pruned, p)
+			}
+		}
+		return pruned
 	}
 
 	if len(m.VisibleNodes) > 0 && m.SelectedIndex < len(m.VisibleNodes) {
@@ -845,92 +862,85 @@ func (m CherryPickModalModel) Update(msg tea.Msg) (CherryPickModalModel, []strin
 			}
 			return m, nil, false
 
+		case "enter":
+			paths := m.GetSelectedPaths()
+			if len(paths) > 0 {
+				return m, paths, true
+			}
+			return m, nil, false
+		}
+
+		if m.UseCustom {
+			var cmd tea.Cmd
+			m.CustomInput, cmd = m.CustomInput.Update(msg)
+			_ = cmd
+			return m, nil, false
+		}
+
+		switch msg.String() {
 		case "up", "k":
-			if !m.UseCustom && m.SelectedIndex > 0 {
+			if m.SelectedIndex > 0 {
 				m.SelectedIndex--
 				m.syncScrollOffset()
 			}
 			return m, nil, false
 
 		case "down", "j":
-			if !m.UseCustom && m.SelectedIndex < len(m.VisibleNodes)-1 {
+			if m.SelectedIndex < len(m.VisibleNodes)-1 {
 				m.SelectedIndex++
 				m.syncScrollOffset()
 			}
 			return m, nil, false
 
-		case " ", "x":
-			if !m.UseCustom {
-				m.toggleSelectCurrent()
-			}
+		case " ", "space", "x":
+			m.toggleSelectCurrent()
 			return m, nil, false
 
 		case "a":
-			if !m.UseCustom {
-				m.toggleSelectAll()
-			}
+			m.toggleSelectAll()
 			return m, nil, false
 
 		case "right", "l", "+":
-			if !m.UseCustom {
-				m.expandCurrent()
-			}
+			m.expandCurrent()
 			return m, nil, false
 
 		case "left", "h", "-":
-			if !m.UseCustom {
-				m.collapseCurrent()
-			}
+			m.collapseCurrent()
 			return m, nil, false
 
 		case "e", "*":
-			if !m.UseCustom {
-				m.toggleExpandAll()
-			}
+			m.toggleExpandAll()
 			return m, nil, false
 
 		case "pgup", "ctrl+u", "b":
-			if !m.UseCustom {
-				m.SelectedIndex = m.SelectedIndex - 8
-				if m.SelectedIndex < 0 {
-					m.SelectedIndex = 0
-				}
-				m.syncScrollOffset()
+			m.SelectedIndex = m.SelectedIndex - 8
+			if m.SelectedIndex < 0 {
+				m.SelectedIndex = 0
 			}
+			m.syncScrollOffset()
 			return m, nil, false
 
 		case "pgdown", "ctrl+d", "f":
-			if !m.UseCustom {
-				m.SelectedIndex = m.SelectedIndex + 8
-				if m.SelectedIndex >= len(m.VisibleNodes) {
-					if len(m.VisibleNodes) > 0 {
-						m.SelectedIndex = len(m.VisibleNodes) - 1
-					} else {
-						m.SelectedIndex = 0
-					}
+			m.SelectedIndex = m.SelectedIndex + 8
+			if m.SelectedIndex >= len(m.VisibleNodes) {
+				if len(m.VisibleNodes) > 0 {
+					m.SelectedIndex = len(m.VisibleNodes) - 1
+				} else {
+					m.SelectedIndex = 0
 				}
-				m.syncScrollOffset()
 			}
+			m.syncScrollOffset()
 			return m, nil, false
 
 		case "home", "g":
-			if !m.UseCustom {
-				m.SelectedIndex = 0
-				m.syncScrollOffset()
-			}
+			m.SelectedIndex = 0
+			m.syncScrollOffset()
 			return m, nil, false
 
 		case "end", "G":
-			if !m.UseCustom && len(m.VisibleNodes) > 0 {
+			if len(m.VisibleNodes) > 0 {
 				m.SelectedIndex = len(m.VisibleNodes) - 1
 				m.syncScrollOffset()
-			}
-			return m, nil, false
-
-		case "enter":
-			paths := m.GetSelectedPaths()
-			if len(paths) > 0 {
-				return m, paths, true
 			}
 			return m, nil, false
 		}

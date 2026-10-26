@@ -42,6 +42,15 @@ func (r *ConfigRestorer) RestoreFullConfig(targetCommitSHA string) (bool, string
 		return false, "", fmt.Errorf("target commit %s contains no configuration data", targetCommitSHA)
 	}
 
+	// Hold record lock across device commit and Git record so the background daemon
+	// cannot race and record a generic commit before the restore metadata is committed.
+	repoDir := ""
+	if r.GitBackend != nil {
+		repoDir = r.GitBackend.RepoDir
+	}
+	unlock := daemon.AcquireRepoRecordLock(repoDir)
+	defer unlock()
+
 	// 1. Apply to the network device first (Source of Truth)
 	success, err := r.SRLClient.ReplaceFullConfig(targetCfg)
 	if err != nil || !success {
@@ -60,13 +69,20 @@ func (r *ConfigRestorer) RestoreFullConfig(targetCommitSHA string) (bool, string
 	}
 
 	// 2. Record timeline commit synchronously under the record lock
-	unlock := daemon.AcquireRecordLock()
-	defer unlock()
+	recordedCfg := targetCfg
+	if verifiedCfg, fetchErr := r.SRLClient.GetRunningConfig("/"); fetchErr == nil && len(verifiedCfg) > 0 {
+		recordedCfg = verifiedCfg
+	}
+
+	srlCommitID := ""
+	if st, ok := r.SRLClient.GetLatestCommitState(); ok && st.CommitID != "" {
+		srlCommitID = st.CommitID
+	}
 
 	_, newSHA, recErr := r.GitBackend.RecordConfigChange(
-		targetCfg,
+		recordedCfg,
 		"admin",
-		"",
+		srlCommitID,
 		"",
 		time.Now().UTC(),
 		msg,
@@ -81,6 +97,138 @@ func (r *ConfigRestorer) RestoreFullConfig(targetCommitSHA string) (bool, string
 		newShort = newShort[:8]
 	}
 	return true, fmt.Sprintf("Successfully restored device configuration to %s (New commit: %s)", shortSHA, newShort), nil
+}
+
+// BuildCherryPickCommands generates the ordered native JSON-RPC "delete" and "update" commands
+// needed to cherry-pick the specified paths from targetCommitSHA onto the switch.
+func (r *ConfigRestorer) BuildCherryPickCommands(targetCommitSHA string, paths ...string) ([]map[string]interface{}, error) {
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("no cherry-pick paths specified")
+	}
+	targetCfg := r.GitBackend.GetConfigAtCommit(targetCommitSHA)
+	if len(targetCfg) == 0 {
+		return nil, fmt.Errorf("commit %s contains no configuration", targetCommitSHA)
+	}
+	parentCfg := r.GitBackend.GetConfigAtCommit(fmt.Sprintf("%s~1", targetCommitSHA))
+	headCfg := r.GitBackend.GetLatestCommitConfig()
+	if r.SRLClient != nil && (r.SRLClient.IsOnBox || r.SRLClient.UseNetNS) {
+		if liveCfg, err := r.SRLClient.GetRunningConfig("/"); err == nil && len(liveCfg) > 0 {
+			headCfg = liveCfg
+		}
+	}
+
+	var deleteXPaths []string
+	var updateValues []map[string]interface{}
+	seenDeletes := make(map[string]bool)
+
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+
+		subtree := filter.FilterConfigSubtree(targetCfg, p)
+		diffRes := differ.SemanticDiff(parentCfg, targetCfg, p)
+		headDiffRes := differ.SemanticDiff(headCfg, targetCfg, p)
+
+		var pathDeletes []string
+		for _, c := range append(diffRes.Changes, headDiffRes.Changes...) {
+			if c.Path == "" {
+				continue
+			}
+			if idxPos := strings.Index(c.Path, "[idx_"); idxPos != -1 {
+				basePath := c.Path[:idxPos]
+				if basePath != "" && !seenDeletes[basePath] {
+					seenDeletes[basePath] = true
+					pathDeletes = append(pathDeletes, basePath)
+				}
+				continue
+			}
+			if c.DiffType == models.DiffDeleted {
+				if strings.HasPrefix(c.Path, "/system/json-rpc-server/unix-socket") || c.Path == "/system/json-rpc-server" {
+					continue
+				}
+				if len(filter.FilterConfigSubtree(targetCfg, c.Path)) == 0 {
+					if !seenDeletes[c.Path] {
+						seenDeletes[c.Path] = true
+						pathDeletes = append(pathDeletes, c.Path)
+					}
+				}
+			}
+		}
+
+		if len(subtree) == 0 && len(pathDeletes) == 0 {
+			if len(filter.FilterConfigSubtree(parentCfg, p)) > 0 || len(filter.FilterConfigSubtree(headCfg, p)) > 0 {
+				if strings.HasPrefix(p, "/") && !seenDeletes[p] &&
+					!strings.HasPrefix(p, "/system/json-rpc-server/unix-socket") && p != "/system/json-rpc-server" {
+					seenDeletes[p] = true
+					pathDeletes = append(pathDeletes, p)
+				}
+			}
+		}
+
+		deleteXPaths = append(deleteXPaths, pathDeletes...)
+
+		if len(subtree) > 0 {
+			cleanSubtree, _ := normalizer.NormalizeStructure(subtree, false).(map[string]interface{})
+			if len(cleanSubtree) == 0 {
+				cleanSubtree = subtree
+			}
+			if r.SRLClient != nil && r.SRLClient.IsOnBox {
+				if sysMap, ok := cleanSubtree["system"].(map[string]interface{}); ok {
+					jrpc, ok := sysMap["json-rpc-server"].(map[string]interface{})
+					if !ok {
+						jrpc = make(map[string]interface{})
+						sysMap["json-rpc-server"] = jrpc
+					}
+					jrpc["admin-state"] = "enable"
+					usock, ok := jrpc["unix-socket"].(map[string]interface{})
+					if !ok {
+						usock = make(map[string]interface{})
+						jrpc["unix-socket"] = usock
+					}
+					usock["admin-state"] = "enable"
+				}
+			}
+			updateValues = append(updateValues, cleanSubtree)
+		}
+	}
+
+	// Prune redundant child delete XPaths when a parent container/list item is already deleted
+	sort.Strings(deleteXPaths)
+	var prunedDeletes []string
+	for _, dp := range deleteXPaths {
+		redundant := false
+		for _, parent := range prunedDeletes {
+			if strings.HasPrefix(dp, parent+"/") || strings.HasPrefix(dp, parent+"[") {
+				redundant = true
+				break
+			}
+		}
+		if !redundant {
+			prunedDeletes = append(prunedDeletes, dp)
+		}
+	}
+
+	var commands []map[string]interface{}
+	for _, dp := range prunedDeletes {
+		commands = append(commands, map[string]interface{}{
+			"action": "delete",
+			"path":   dp,
+		})
+	}
+	for _, uv := range updateValues {
+		commands = append(commands, map[string]interface{}{
+			"action": "update",
+			"path":   "/",
+			"value":  uv,
+		})
+	}
+
+	if len(commands) == 0 {
+		return nil, fmt.Errorf("no configuration changes generated for specified paths %v in revision %s", paths, targetCommitSHA)
+	}
+	return commands, nil
 }
 
 // BuildCherryPickCLIStatements generates the ordered "delete / ..." and "set / ..." CLI statements
@@ -114,6 +262,15 @@ func (r *ConfigRestorer) BuildCherryPickCLIStatements(targetCommitSHA string, pa
 		// Collect deletions from commit delta and from current HEAD under path p
 		var pathDeletes []string
 		for _, c := range append(diffRes.Changes, headDiffRes.Changes...) {
+			if idxPos := strings.Index(c.Path, "[idx_"); idxPos != -1 {
+				basePath := c.Path[:idxPos]
+				cliDelPath := filter.XPathToCLIPath(basePath)
+				if cliDelPath != "" && !seenDeletes[cliDelPath] {
+					seenDeletes[cliDelPath] = true
+					pathDeletes = append(pathDeletes, cliDelPath)
+				}
+				continue
+			}
 			if c.DiffType == models.DiffDeleted {
 				if len(filter.FilterConfigSubtree(targetCfg, c.Path)) == 0 {
 					cliDelPath := filter.XPathToCLIPath(c.Path)
@@ -177,17 +334,26 @@ func (r *ConfigRestorer) BuildCherryPickCLIStatements(targetCommitSHA string, pa
 	return allCLIStatements, nil
 }
 
-// CherryPickRestore applies one or more subtree/path configurations from a commit to the live switch.
+// CherryPickRestore applies one or more subtree/path configurations from a commit to the live switch via native JSON-RPC.
 func (r *ConfigRestorer) CherryPickRestore(targetCommitSHA string, paths ...string) (bool, string, error) {
-	allCLIStatements, err := r.BuildCherryPickCLIStatements(targetCommitSHA, paths...)
+	// Hold record lock across command generation, device commit, and Git record so the background daemon
+	// cannot race and record a generic commit before the cherry-pick metadata is committed.
+	repoDir := ""
+	if r.GitBackend != nil {
+		repoDir = r.GitBackend.RepoDir
+	}
+	unlock := daemon.AcquireRepoRecordLock(repoDir)
+	defer unlock()
+
+	commands, err := r.BuildCherryPickCommands(targetCommitSHA, paths...)
 	if err != nil {
 		return false, "", err
 	}
 
-	// 1. Apply to device first (ExecuteCLI wraps statements in an isolated timeline-tx candidate transaction)
-	ok, outMsg, err := r.SRLClient.ExecuteCLI(allCLIStatements)
+	// 1. Apply to device first using native JSON-RPC set (executes in an isolated private candidate transaction)
+	ok, err := r.SRLClient.ApplyConfigCommands(commands)
 	if err != nil || !ok {
-		return false, "", fmt.Errorf("failed to apply cherry-pick to device: %v (CLI output: %s)", err, outMsg)
+		return false, "", fmt.Errorf("failed to apply cherry-pick to device: %w", err)
 	}
 
 	shortSHA := targetCommitSHA
@@ -212,15 +378,16 @@ func (r *ConfigRestorer) CherryPickRestore(targetCommitSHA string, paths ...stri
 	}
 
 	// 2. Synchronously record the new running state in timeline git under the record lock
-	unlock := daemon.AcquireRecordLock()
-	defer unlock()
-
 	verifiedCfg, fetchErr := r.SRLClient.GetRunningConfig("/")
 	if fetchErr == nil && len(verifiedCfg) > 0 {
+		srlCommitID := ""
+		if st, ok := r.SRLClient.GetLatestCommitState(); ok && st.CommitID != "" {
+			srlCommitID = st.CommitID
+		}
 		_, _, _ = r.GitBackend.RecordConfigChange(
 			verifiedCfg,
 			"admin",
-			"",
+			srlCommitID,
 			"",
 			time.Now().UTC(),
 			msg,

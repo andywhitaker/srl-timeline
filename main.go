@@ -26,6 +26,7 @@ import (
 const Version = "0.0.3"
 
 func init() {
+	lipgloss.SetHasDarkBackground(true)
 	if os.Getenv("NO_COLOR") == "" {
 		lipgloss.SetColorProfile(termenv.TrueColor)
 	}
@@ -45,7 +46,7 @@ Usage:
   timeline export [<rev>] [--format json|cli] [--output <file>] [--save-startup]
   timeline blame [<rev>] [--filter <path|author>]
   timeline remote [show|key|set <url> [--branch <name>] [--auto-push]|push]
-  timeline daemon [start|stop|status]
+  timeline daemon [start|stop|status|bootstrap]
   timeline version
 `, Version)
 }
@@ -64,12 +65,7 @@ func main() {
 
 	if len(os.Args) < 2 || strings.HasPrefix(os.Args[1], "-") {
 		// Launch interactive Bubble Tea TUI
-		initialFilter := ""
-		for i, arg := range os.Args {
-			if (arg == "-f" || arg == "--filter") && i+1 < len(os.Args) {
-				initialFilter = os.Args[i+1]
-			}
-		}
+		initialFilter := extractInitialFilter(os.Args[1:])
 		if err := tui.RunTUI(initialFilter); err != nil {
 			fmt.Fprintf(os.Stderr, "Error running timeline TUI: %v\n", err)
 			os.Exit(1)
@@ -84,7 +80,10 @@ func main() {
 	if subcommand != "daemon" {
 		if !backend.HasCommits() {
 			if cfg, err := client.GetRunningConfig("/"); err == nil && len(cfg) > 0 {
-				_, _, _ = backend.EnsureBaseline(cfg)
+				if unlock, ok := daemon.TryAcquireRepoRecordLock(backend.RepoDir); ok {
+					_, _, _ = backend.EnsureBaseline(cfg)
+					unlock()
+				}
 			}
 		}
 	}
@@ -94,12 +93,7 @@ func main() {
 		fmt.Printf("srl-timeline version %s\n", Version)
 		return
 	case "tui":
-		initialFilter := ""
-		for i, arg := range os.Args {
-			if (arg == "-f" || arg == "--filter") && i+1 < len(os.Args) {
-				initialFilter = os.Args[i+1]
-			}
-		}
+		initialFilter := extractInitialFilter(os.Args[2:])
 		if err := tui.RunTUI(initialFilter); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -237,27 +231,46 @@ func main() {
 		}
 
 	case "restore", "cherry-pick":
-		restoreFlags := flag.NewFlagSet("restore", flag.ExitOnError)
+		restoreFlags := flag.NewFlagSet(subcommand, flag.ExitOnError)
 		subtreePath := restoreFlags.String("path", "", "Subtree path for cherry-pick restoration (e.g. /interface[name=ethernet-1/1])")
 		yes := restoreFlags.Bool("yes", false, "Confirm restore without prompt")
 		_ = restoreFlags.Parse(reorderFlags(os.Args[2:], "yes"))
 
 		if len(restoreFlags.Args()) == 0 {
-			fmt.Println("Usage: timeline restore <commit-sha> [--path <subtree>] [--yes]")
+			if subcommand == "cherry-pick" {
+				fmt.Println("Usage: timeline cherry-pick <commit-sha> --path <subtree> [--yes]")
+			} else {
+				fmt.Println("Usage: timeline restore <commit-sha> [--path <subtree>] [--yes]")
+			}
 			os.Exit(1)
 		}
 		targetSHA := restoreFlags.Args()[0]
 
+		var cleanPaths []string
 		if *subtreePath != "" {
 			rawPaths := strings.Split(*subtreePath, ",")
-			var cleanPaths []string
 			for _, p := range rawPaths {
 				p = strings.TrimSpace(p)
 				if p != "" {
 					cleanPaths = append(cleanPaths, p)
 				}
 			}
+		}
+		for _, posArg := range restoreFlags.Args()[1:] {
+			for _, p := range strings.Split(posArg, ",") {
+				p = strings.TrimSpace(p)
+				if p != "" {
+					cleanPaths = append(cleanPaths, p)
+				}
+			}
+		}
 
+		if subcommand == "cherry-pick" && len(cleanPaths) == 0 {
+			fmt.Fprintln(os.Stderr, "Error: timeline cherry-pick requires --path <subtree>")
+			os.Exit(1)
+		}
+
+		if len(cleanPaths) > 0 {
 			if !*yes {
 				fmt.Printf("Are you sure you want to cherry-pick restore %v from %s? (y/N): ", cleanPaths, targetSHA)
 				var resp string
@@ -461,3 +474,20 @@ func reorderFlags(args []string, boolFlagNames ...string) []string {
 	}
 	return append(flags, pos...)
 }
+
+func extractInitialFilter(args []string) string {
+	var initialFilter string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if (arg == "-f" || arg == "--filter") && i+1 < len(args) {
+			initialFilter = args[i+1]
+			i++
+		} else if strings.HasPrefix(arg, "--filter=") {
+			initialFilter = strings.TrimPrefix(arg, "--filter=")
+		} else if strings.HasPrefix(arg, "-f=") {
+			initialFilter = strings.TrimPrefix(arg, "-f=")
+		}
+	}
+	return initialFilter
+}
+

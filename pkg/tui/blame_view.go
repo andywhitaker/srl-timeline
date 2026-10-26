@@ -64,6 +64,7 @@ func (m *BlameViewModel) SetSize(width, height int) {
 // UpdateContent builds the combined blame line table and metrics sidebar.
 func (m *BlameViewModel) UpdateContent() {
 	if len(m.Entries) == 0 {
+		m.lastRendered = ""
 		m.Viewport.SetContent(lipgloss.NewStyle().Foreground(ColorMuted).Padding(1, 2).Render("No blame entries available."))
 		return
 	}
@@ -95,8 +96,9 @@ func (m *BlameViewModel) UpdateContent() {
 		cleanContent := strings.ReplaceAll(e.Content, "\n", " ")
 		cleanContent = strings.ReplaceAll(cleanContent, "\r", " ")
 		cleanContent = strings.ReplaceAll(cleanContent, "\\n", " ")
-		if len(cleanContent) > maxContentW {
-			cleanContent = cleanContent[:maxContentW-3] + "..."
+		contentRunes := []rune(cleanContent)
+		if len(contentRunes) > maxContentW {
+			cleanContent = string(contentRunes[:maxContentW-3]) + "..."
 		}
 
 		contentStyled := lipgloss.NewStyle().Foreground(ColorText).Render(cleanContent)

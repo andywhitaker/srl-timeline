@@ -117,6 +117,7 @@ type AppModel struct {
 	liveConfigFetched time.Time
 	isFetchingLiveCfg bool
 	isCheckingHead    bool
+	isRestoring       bool
 
 	// Realtime channel
 	commitChan chan models.TimelineCommit
@@ -124,6 +125,7 @@ type AppModel struct {
 
 // NewAppModel initializes the Bubble Tea application model.
 func NewAppModel(backend *gitbackend.GitBackend, client *srlclient.SRLClient, initialFilter string) AppModel {
+	lipgloss.SetHasDarkBackground(true)
 	if backend == nil {
 		backend = gitbackend.NewGitBackend("")
 	}
@@ -137,8 +139,13 @@ func NewAppModel(backend *gitbackend.GitBackend, client *srlclient.SRLClient, in
 	b := blame.NewBlameEngine(backend)
 
 	if !backend.HasCommits() {
-		if cfg, err := client.GetRunningConfig("/"); err == nil && len(cfg) > 0 {
-			_, _, _ = backend.EnsureBaseline(cfg)
+		if unlock, ok := daemon.TryAcquireRepoRecordLock(backend.RepoDir); ok {
+			if !backend.HasCommits() {
+				if cfg, err := client.GetRunningConfig("/"); err == nil && len(cfg) > 0 {
+					_, _, _ = backend.EnsureBaseline(cfg)
+				}
+			}
+			unlock()
 		}
 	}
 
@@ -234,9 +241,8 @@ func fetchRemoteStatusCmd(backend *gitbackend.GitBackend) tea.Cmd {
 
 // Init starts the Bubble Tea loop and background daemon if not already running.
 func (m AppModel) Init() tea.Cmd {
-	if !daemon.IsDaemonRunning(daemon.DefaultPIDFile) && !daemon.IsDaemonRunning(daemon.FallbackPIDFile) {
+	if running, _, _ := daemon.IsAnyDaemonRunning(); !running {
 		m.Daemon.Start()
-		daemon.WriteCurrentPIDFile()
 	}
 
 	return tea.Batch(
@@ -339,6 +345,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case remoteSyncStatusMsg:
+		if msg.status != "" && msg.status != "Not Configured" {
+			m.HeaderBar.SyncStatus = msg.status
+		} else if msg.status == "Not Configured" {
+			m.HeaderBar.SyncStatus = "Local Only"
+		}
 		if m.ActiveModal == ModalRemote {
 			if msg.status != "" {
 				m.RemoteModal.Config.SyncStatus = msg.status
@@ -400,6 +411,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, waitForRealtimeCommit(m.commitChan))
 
 	case NotificationMsg:
+		m.isRestoring = false
 		var style lipgloss.Style
 		switch msg.Severity {
 		case "error":
@@ -541,10 +553,17 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			m.Daemon.Stop()
-			daemon.RemoveOwnPIDFile()
 			return m, tea.Quit
 
 		case "r":
+			if m.isRestoring {
+				m.setNotification(
+					"Restore/cherry-pick operation already in progress...",
+					lipgloss.NewStyle().Background(ColorWarning).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+				)
+				cmds = append(cmds, clearNotificationCmd())
+				return m, tea.Batch(cmds...)
+			}
 			selected := m.TimelineView.SelectedCommit()
 			if selected != nil {
 				m.RestoreModal = modals.NewRestoreModal(*selected, m.Width, m.Height)
@@ -563,6 +582,14 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 
 		case "p":
+			if m.isRestoring {
+				m.setNotification(
+					"Restore/cherry-pick operation already in progress...",
+					lipgloss.NewStyle().Background(ColorWarning).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+				)
+				cmds = append(cmds, clearNotificationCmd())
+				return m, tea.Batch(cmds...)
+			}
 			selected := m.TimelineView.SelectedCommit()
 			if selected != nil {
 				curCfg := m.GitBackend.GetConfigAtCommit(selected.FullSHA)
@@ -662,7 +689,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				)
 				cmds = append(cmds, clearNotificationCmd())
 				return m, tea.Batch(cmds...)
-			case "2", "j":
+			case "2":
 				m.ConfigView.FormatMode = "json"
 				m.ConfigView.UpdateContent()
 				m.setNotification(
@@ -707,7 +734,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.BlameView.Viewport.ViewUp()
 				}
 				return m, nil
-			case "pgdown", "space", "f", "ctrl+d":
+			case "pgdown", " ", "space", "f", "ctrl+d":
 				switch m.ActiveTab {
 				case TabDiff:
 					m.DiffView.Viewport.ViewDown()
@@ -748,6 +775,18 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "k", "up":
 				m.TimelineView.Prev()
 				m.updateActiveTabContent()
+			case "home":
+				m.TimelineView.GotoTop()
+				m.updateActiveTabContent()
+			case "end", "G":
+				m.TimelineView.GotoBottom()
+				m.updateActiveTabContent()
+			case "pgup", "ctrl+u":
+				m.TimelineView.PageUp()
+				m.updateActiveTabContent()
+			case "pgdown", " ", "space", "ctrl+d":
+				m.TimelineView.PageDown()
+				m.updateActiveTabContent()
 			}
 		}
 
@@ -759,8 +798,37 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.ActiveModal == ModalCherryPick {
+		var selectedSubtrees []string
+		var close bool
+		m.CherryPickModal, selectedSubtrees, close = m.CherryPickModal.Update(msg)
+		if close {
+			m.ActiveModal = ModalNone
+			if len(selectedSubtrees) > 0 && !m.isRestoring {
+				m.isRestoring = true
+				var notifyStr string
+				if len(selectedSubtrees) == 1 {
+					notifyStr = fmt.Sprintf("Applying cherry-pick '%s' to switch...", selectedSubtrees[0])
+				} else {
+					notifyStr = fmt.Sprintf("Applying %d cherry-picked paths to switch...", len(selectedSubtrees))
+				}
+				m.setNotification(
+					notifyStr,
+					lipgloss.NewStyle().Background(ColorWarning).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+				)
+				sha := m.CherryPickModal.Commit.FullSHA
+				return m, performCherryPickCmd(m.Restorer, sha, selectedSubtrees...)
+			}
+		}
+		return m, nil
+	}
 	if m.ActiveModal != ModalNone {
 		return m, nil
+	}
+
+	notifExtra := 0
+	if m.Notification != "" {
+		notifExtra = 1
 	}
 
 	timelineWidth := (m.Width * 38) / 100
@@ -794,8 +862,8 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, m.FilterBar.Focus()
 	}
 
-	// 2. Click on Top Tab Bar (Y == 4, X > timelineWidth)
-	if msg.Y == 4 && msg.X > timelineWidth && msg.Type == tea.MouseLeft {
+	// 2. Click on Top Tab Bar (Y == 4 + notifExtra, X > timelineWidth)
+	if msg.Y == 4+notifExtra && msg.X > timelineWidth && msg.Type == tea.MouseLeft {
 		tabOffset := msg.X - timelineWidth
 		detailOuterWidth := m.Width - timelineWidth - 1
 		diffTitle := "🔍 Diff View [d]"
@@ -902,8 +970,8 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			}
 
 			// Sub-row hit testing for commit list:
-			if msg.Y >= 6 {
-				clickedRow := (msg.Y - 6 + m.TimelineView.Viewport.YOffset) / 3
+			if msg.Y >= 6+notifExtra {
+				clickedRow := (msg.Y - (6 + notifExtra) + m.TimelineView.Viewport.YOffset) / 3
 				if clickedRow >= 0 && clickedRow < len(m.TimelineView.Commits) {
 					m.TimelineView.SelectedIndex = clickedRow
 					m.TimelineView.UpdateViewportContent()
@@ -930,19 +998,19 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 			tabOffset := msg.X - timelineWidth
 
-			// Sub-Option Controls Bar Clicks (Y == 6 or Y == 7)
-			if msg.Y == 6 || msg.Y == 7 {
+			// Sub-Option Controls Bar Clicks (Y == 6 + notifExtra or Y == 7 + notifExtra)
+			if msg.Y == 6+notifExtra || msg.Y == 7+notifExtra {
 				if m.ActiveTab == TabDiff {
-					if tabOffset >= 2 && tabOffset <= 14 {
+					if tabOffset >= 2 && tabOffset <= 12 {
 						m.DiffView.DiffMode = "unified"
 						m.DiffView.UpdateContent()
-					} else if tabOffset >= 15 && tabOffset <= 26 {
+					} else if tabOffset >= 13 && tabOffset <= 24 {
 						m.DiffView.DiffMode = "path"
 						m.DiffView.UpdateContent()
-					} else if tabOffset >= 27 && tabOffset <= 37 {
+					} else if tabOffset >= 25 && tabOffset <= 34 {
 						m.DiffView.DiffMode = "cli"
 						m.DiffView.UpdateContent()
-					} else if tabOffset >= 38 && tabOffset <= 56 {
+					} else if tabOffset >= 35 && tabOffset <= 56 {
 						m.VsLive = !m.VsLive
 						m.DiffView.VsLive = m.VsLive
 						m.updateActiveTabContent()
@@ -953,10 +1021,14 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 				} else if m.ActiveTab == TabConfig {
-					if tabOffset >= 2 && tabOffset <= 18 {
+					cliEnd := 17
+					if m.ConfigView.FormatMode == "cli" {
+						cliEnd = 19
+					}
+					if tabOffset >= 2 && tabOffset <= cliEnd {
 						m.ConfigView.FormatMode = "cli"
 						m.ConfigView.UpdateContent()
-					} else if tabOffset >= 19 && tabOffset <= 45 {
+					} else if tabOffset > cliEnd && tabOffset <= 45 {
 						m.ConfigView.FormatMode = "json"
 						m.ConfigView.UpdateContent()
 					}
@@ -976,7 +1048,8 @@ func (m AppModel) handleModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.RestoreModal, confirmed, close = m.RestoreModal.Update(msg)
 		if close {
 			m.ActiveModal = ModalNone
-			if confirmed {
+			if confirmed && !m.isRestoring {
+				m.isRestoring = true
 				m.setNotification(
 					"Applying configuration restore to SR Linux switch...",
 					lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
@@ -992,7 +1065,8 @@ func (m AppModel) handleModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.CherryPickModal, selectedSubtrees, close = m.CherryPickModal.Update(msg)
 		if close {
 			m.ActiveModal = ModalNone
-			if len(selectedSubtrees) > 0 {
+			if len(selectedSubtrees) > 0 && !m.isRestoring {
+				m.isRestoring = true
 				var notifyStr string
 				if len(selectedSubtrees) == 1 {
 					notifyStr = fmt.Sprintf("Applying cherry-pick '%s' to switch...", selectedSubtrees[0])
@@ -1014,43 +1088,13 @@ func (m AppModel) handleModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ExportModal, format, outputPath, close = m.ExportModal.Update(msg)
 		if close {
 			m.ActiveModal = ModalNone
-			if format == "startup" {
-				ok, resMsg, err := m.Exporter.SaveAsDeviceStartupConfig(m.ExportModal.Commit.FullSHA)
-				if err != nil || !ok {
-					m.setNotification(
-						fmt.Sprintf("Export startup failed: %v", err),
-						lipgloss.NewStyle().Background(ColorDanger).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
-					)
-				} else {
-					m.setNotification(
-						resMsg,
-						lipgloss.NewStyle().Background(ColorSuccess).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
-					)
-				}
-				return m, clearNotificationCmd()
-			} else if outputPath != "" {
-				var exportErr error
-				if format == "json" {
-					_, exportErr = m.Exporter.ExportAsStartupJSON(m.ExportModal.Commit.FullSHA, outputPath)
-				} else {
-					_, exportErr = m.Exporter.ExportAsFlatCLI(m.ExportModal.Commit.FullSHA, outputPath)
-				}
-				if exportErr != nil {
-					m.setNotification(
-						fmt.Sprintf("Export failed: %v", exportErr),
-						lipgloss.NewStyle().Background(ColorDanger).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
-					)
-				} else {
-					shortSHA := m.ExportModal.Commit.FullSHA
-					if len(shortSHA) > 8 {
-						shortSHA = shortSHA[:8]
-					}
-					m.setNotification(
-						fmt.Sprintf("Exported revision %s to %s", shortSHA, outputPath),
-						lipgloss.NewStyle().Background(ColorSuccess).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
-					)
-				}
-				return m, clearNotificationCmd()
+			if format == "startup" || outputPath != "" {
+				sha := m.ExportModal.Commit.FullSHA
+				m.setNotification(
+					"Exporting configuration...",
+					lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+				)
+				return m, performExportCmd(m.Exporter, sha, format, outputPath)
 			}
 		}
 
@@ -1100,6 +1144,44 @@ func (m AppModel) handleModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func performExportCmd(exp *exporter.ConfigExporter, sha, format, outputPath string) tea.Cmd {
+	return func() tea.Msg {
+		if format == "startup" {
+			ok, resMsg, err := exp.SaveAsDeviceStartupConfig(sha)
+			if err != nil || !ok {
+				return NotificationMsg{
+					Message:  fmt.Sprintf("Export startup failed: %v", err),
+					Severity: "error",
+				}
+			}
+			return NotificationMsg{
+				Message:  resMsg,
+				Severity: "success",
+			}
+		}
+		var exportErr error
+		if format == "json" {
+			_, exportErr = exp.ExportAsStartupJSON(sha, outputPath)
+		} else {
+			_, exportErr = exp.ExportAsFlatCLI(sha, outputPath)
+		}
+		if exportErr != nil {
+			return NotificationMsg{
+				Message:  fmt.Sprintf("Export failed: %v", exportErr),
+				Severity: "error",
+			}
+		}
+		shortSHA := sha
+		if len(shortSHA) > 8 {
+			shortSHA = shortSHA[:8]
+		}
+		return NotificationMsg{
+			Message:  fmt.Sprintf("Exported revision %s to %s", shortSHA, outputPath),
+			Severity: "success",
+		}
+	}
 }
 
 func performRestoreCmd(restorer *restorer.ConfigRestorer, sha string) tea.Cmd {
@@ -1154,6 +1236,17 @@ func (m *AppModel) resizeLayout(width, height int) {
 	m.HeaderBar.Width = width
 	m.FilterBar.SetWidth(width)
 	m.FooterBar.Width = width
+
+	m.RestoreModal.Width = width
+	m.RestoreModal.Height = height
+	m.CherryPickModal.Width = width
+	m.CherryPickModal.Height = height
+	m.ExportModal.Width = width
+	m.ExportModal.Height = height
+	m.RemoteModal.Width = width
+	m.RemoteModal.Height = height
+	m.HelpModal.Width = width
+	m.HelpModal.Height = height
 
 	m.syncPaneHeights()
 	m.refreshTimeline()
@@ -1326,12 +1419,13 @@ func (m AppModel) View() string {
 
 // RunTUI launches the Bubble Tea interactive TUI.
 func RunTUI(initialFilter string) error {
+	lipgloss.SetHasDarkBackground(true)
 	if os.Getenv("NO_COLOR") == "" {
 		lipgloss.SetColorProfile(termenv.TrueColor)
 	}
-	defer daemon.RemoveOwnPIDFile()
 	p := tea.NewProgram(
 		NewAppModel(nil, nil, initialFilter),
+		tea.WithOutput(termenv.NewOutput(os.Stdout)),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 		tea.WithMouseAllMotion(),

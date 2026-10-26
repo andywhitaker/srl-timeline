@@ -206,7 +206,7 @@ func (m RemoteModalModel) Update(msg tea.Msg) (RemoteModalModel, bool, bool, boo
 			}
 			return m, false, false, false
 
-		case "space":
+		case " ", "space":
 			if m.FocusedIndex == 1 {
 				m.AutoPush = !m.AutoPush
 				return m, false, false, false

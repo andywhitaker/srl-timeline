@@ -2,6 +2,8 @@ package filter
 
 import (
 	"testing"
+
+	"timeline/pkg/models"
 )
 
 func TestIsPathMatching(t *testing.T) {
@@ -235,3 +237,20 @@ func TestCompoundKeyCLIQueryMatchesXPath(t *testing.T) {
 		t.Fatalf("expected CLI query with secondary key keyword 'mask-length-range 24..32' to match XPath")
 	}
 }
+
+func TestFilterDiffResultDeduplicatesParentCounts(t *testing.T) {
+	raw := models.SemanticDiffResult{
+		HasChanges: true,
+		AddedCount: 2,
+		Changes: []models.PathChange{
+			{Path: "/interface[name=ethernet-1/1]", DiffType: models.DiffAdded},
+			{Path: "/interface[name=ethernet-1/1]/admin-state", DiffType: models.DiffAdded, NewValue: "enable"},
+			{Path: "/interface[name=ethernet-1/1]/description", DiffType: models.DiffAdded, NewValue: "Uplink"},
+		},
+	}
+	filtered := FilterDiffResult(raw, "ethernet-1/1")
+	if filtered.AddedCount != 2 {
+		t.Fatalf("expected AddedCount=2 (skipping intermediate parent PathChange), got %d", filtered.AddedCount)
+	}
+}
+

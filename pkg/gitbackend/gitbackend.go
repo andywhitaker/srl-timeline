@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"timeline/pkg/differ"
@@ -137,6 +138,27 @@ func isRemoteGitOp(args []string) bool {
 }
 
 func (b *GitBackend) runGit(args []string, env map[string]string) (string, error) {
+	if !hasGitBinary() && !isRemoteGitOp(args) && len(args) > 0 {
+		switch args[0] {
+		case "rev-parse":
+			return b.resolveRevNative(args[len(args)-1])
+		case "show":
+			return b.showFileNative(args[len(args)-1])
+		case "log":
+			limit := 250
+			for _, a := range args[1:] {
+				if strings.HasPrefix(a, "--max-count=") {
+					if n, err := strconv.Atoi(strings.TrimPrefix(a, "--max-count=")); err == nil && n > 0 {
+						limit = n
+					}
+				}
+			}
+			return b.logLinesNative(limit)
+		case "config", "add", "reset", "remote":
+			return "", nil
+		}
+	}
+
 	// Disable git hooks execution (-c core.hooksPath=/dev/null) to prevent privilege escalation
 	fullArgs := append([]string{"-c", "safe.directory=*", "-c", "core.hooksPath=/dev/null", "-C", b.RepoDir}, args...)
 	cmdEnv := os.Environ()
@@ -161,14 +183,9 @@ func (b *GitBackend) runGit(args []string, env map[string]string) (string, error
 				cmdEnv = append(cmdEnv, fmt.Sprintf("GIT_SSH_COMMAND=%s", sshCmd))
 			}
 		}
-		if _, err := os.Stat("/var/run/netns/srbase-mgmt"); err == nil {
-			if os.Geteuid() != 0 {
-				netnsArgs := append([]string{"-n", "ip", "netns", "exec", "srbase-mgmt", "git"}, fullArgs...)
-				cmd = exec.Command("sudo", netnsArgs...)
-			} else {
-				netnsArgs := append([]string{"netns", "exec", "srbase-mgmt", "git"}, fullArgs...)
-				cmd = exec.Command("ip", netnsArgs...)
-			}
+		if _, err := os.Stat("/var/run/netns/srbase-mgmt"); err == nil && os.Geteuid() == 0 {
+			netnsArgs := append([]string{"netns", "exec", "srbase-mgmt", "git"}, fullArgs...)
+			cmd = exec.Command("ip", netnsArgs...)
 		}
 	}
 	if cmd == nil {
@@ -186,15 +203,38 @@ func (b *GitBackend) runGit(args []string, env map[string]string) (string, error
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+// ensureUserOwnedSSHKey ensures the returned private key is owned by the current effective UID
+// with strict 0600 permissions required by OpenSSH, materializing a per-UID copy in /tmp when
+// reading a group-shared key from /etc/opt/srlinux/timeline.
+func ensureUserOwnedSSHKey(keyPath string, privData []byte) string {
+	info, err := os.Stat(keyPath)
+	if err == nil {
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+			if int(stat.Uid) == os.Geteuid() && info.Mode().Perm() == 0600 {
+				return keyPath
+			}
+		}
+	}
+	userKey := fmt.Sprintf("/tmp/timeline_id_ed25519_%d", os.Geteuid())
+	if writeErr := os.WriteFile(userKey, privData, 0600); writeErr == nil {
+		_ = os.Chmod(userKey, 0600)
+		if pubData, pubErr := os.ReadFile(keyPath + ".pub"); pubErr == nil && len(pubData) > 0 {
+			_ = os.WriteFile(userKey+".pub", pubData, 0644)
+		}
+		return userKey
+	}
+	return keyPath
+}
+
 // GetSSHKeyPath returns the path to the SSH private key used for remote operations.
 func (b *GitBackend) GetSSHKeyPath() string {
 	homeDir, _ := os.UserHomeDir()
 	candidateKeys := []string{
-		filepath.Join(homeDir, ".ssh", "id_ed25519"),
-		filepath.Join(homeDir, ".ssh", "id_rsa"),
 		filepath.Join(b.RepoDir, "id_ed25519"),
 		filepath.Join(filepath.Dir(b.RepoDir), "id_ed25519"),
 		"/etc/opt/srlinux/timeline/id_ed25519",
+		filepath.Join(homeDir, ".ssh", "id_ed25519"),
+		filepath.Join(homeDir, ".ssh", "id_rsa"),
 		"/root/.ssh/id_ed25519",
 		"/root/.ssh/id_rsa",
 		"/home/srlinux/.ssh/id_ed25519",
@@ -202,7 +242,9 @@ func (b *GitBackend) GetSSHKeyPath() string {
 
 	for _, k := range candidateKeys {
 		if info, err := os.Stat(k); err == nil && !info.IsDir() {
-			return k
+			if privData, readErr := os.ReadFile(k); readErr == nil && len(privData) > 0 {
+				return ensureUserOwnedSSHKey(k, privData)
+			}
 		}
 	}
 
@@ -216,8 +258,16 @@ func (b *GitBackend) GetSSHKeyPath() string {
 	newKey := filepath.Join(keyDir, "id_ed25519")
 	cmd := exec.Command("ssh-keygen", "-t", "ed25519", "-N", "", "-f", newKey, "-C", "srl-timeline@device")
 	if err := cmd.Run(); err == nil {
-		_ = os.Chmod(newKey, 0600)
-		_ = os.Chmod(newKey+".pub", 0644)
+		if ResolveSharedGID() > 0 {
+			ApplySharedFilePermissions(newKey)
+			ApplySharedFilePermissions(newKey + ".pub")
+		} else {
+			_ = os.Chmod(newKey, 0600)
+			_ = os.Chmod(newKey+".pub", 0644)
+		}
+		if privData, readErr := os.ReadFile(newKey); readErr == nil && len(privData) > 0 {
+			return ensureUserOwnedSSHKey(newKey, privData)
+		}
 		return newKey
 	}
 
@@ -241,12 +291,8 @@ func (b *GitBackend) GetPublicSSHKey() string {
 func (b *GitBackend) getSSHCommand() string {
 	keyPath := b.GetSSHKeyPath()
 	var prefix string
-	if _, err := os.Stat("/var/run/netns/srbase-mgmt"); err == nil {
-		if os.Geteuid() != 0 {
-			prefix = "sudo -n ip netns exec srbase-mgmt "
-		} else {
-			prefix = "ip netns exec srbase-mgmt "
-		}
+	if _, err := os.Stat("/var/run/netns/srbase-mgmt"); err == nil && os.Geteuid() == 0 {
+		prefix = "ip netns exec srbase-mgmt "
 	}
 	if keyPath != "" {
 		return fmt.Sprintf("%sssh -i %s -o StrictHostKeyChecking=accept-new -o BatchMode=yes", prefix, keyPath)
@@ -261,7 +307,9 @@ func (b *GitBackend) ensureRepo() {
 		ApplySharedDirPermissions(parent)
 	}
 	gitDir := filepath.Join(b.RepoDir, ".git")
-	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+	if !hasGitBinary() {
+		b.ensureRepoNative()
+	} else if _, err := os.Stat(gitDir); os.IsNotExist(err) {
 		cmd := exec.Command("git", "-c", "safe.directory=*", "init", "--shared=group", "-b", "main", b.RepoDir)
 		_ = cmd.Run()
 		_, _ = b.runGit([]string{"config", "user.name", "SR Linux Timeline"}, nil)
@@ -399,25 +447,6 @@ func (b *GitBackend) RecordConfigChange(
 	_ = os.WriteFile(metaFile, metaJSON, 0664)
 	ApplySharedFilePermissions(metaFile)
 
-	// Stage
-	_, err = b.runGit([]string{"add", "config.json", "config.cli", "metadata.json"}, nil)
-	if err != nil {
-		b.mu.Unlock()
-		return false, "", err
-	}
-
-	// Verify that at least config.json or config.cli has staged changes against HEAD
-	_, errHead := b.runGit([]string{"rev-parse", "--verify", "HEAD"}, nil)
-	if errHead == nil {
-		stagedDiff, _ := b.runGit([]string{"diff", "--cached", "--name-only", "config.json", "config.cli"}, nil)
-		if strings.TrimSpace(stagedDiff) == "" {
-			_, _ = b.runGit([]string{"reset", "HEAD"}, nil)
-			headSHA, _ := b.runGit([]string{"rev-parse", "HEAD"}, nil)
-			b.mu.Unlock()
-			return false, headSHA, nil
-		}
-	}
-
 	if message == "" {
 		message = fmt.Sprintf("Config commit by %s", author)
 		if commitID != "" {
@@ -431,26 +460,55 @@ func (b *GitBackend) RecordConfigChange(
 		}
 	}
 
-	authorEmail := fmt.Sprintf("%s@srl-timeline", author)
-	authorStr := fmt.Sprintf("%s <%s>", author, authorEmail)
-	dateStr := timestamp.Format("2006-01-02 15:04:05 -0700")
+	var sha string
+	if !hasGitBinary() {
+		sha, err = b.commitNative(canonicalJSON, cliText, metaJSON, author, message, timestamp)
+		if err != nil {
+			b.mu.Unlock()
+			return false, "", err
+		}
+	} else {
+		// Stage
+		_, err = b.runGit([]string{"add", "config.json", "config.cli", "metadata.json"}, nil)
+		if err != nil {
+			b.mu.Unlock()
+			return false, "", err
+		}
 
-	env := map[string]string{
-		"GIT_AUTHOR_NAME":     author,
-		"GIT_AUTHOR_EMAIL":    authorEmail,
-		"GIT_AUTHOR_DATE":     dateStr,
-		"GIT_COMMITTER_NAME":  "SR Linux Timeline",
-		"GIT_COMMITTER_EMAIL": "timeline@srl-timeline",
-		"GIT_COMMITTER_DATE":  dateStr,
+		// Verify that at least config.json or config.cli has staged changes against HEAD
+		_, errHead := b.runGit([]string{"rev-parse", "--verify", "HEAD"}, nil)
+		if errHead == nil {
+			stagedDiff, _ := b.runGit([]string{"diff", "--cached", "--name-only", "config.json", "config.cli"}, nil)
+			if strings.TrimSpace(stagedDiff) == "" {
+				_, _ = b.runGit([]string{"reset", "HEAD"}, nil)
+				headSHA, _ := b.runGit([]string{"rev-parse", "HEAD"}, nil)
+				b.mu.Unlock()
+				return false, headSHA, nil
+			}
+		}
+
+		authorEmail := fmt.Sprintf("%s@srl-timeline", author)
+		authorStr := fmt.Sprintf("%s <%s>", author, authorEmail)
+		dateStr := timestamp.Format("2006-01-02 15:04:05 -0700")
+
+		env := map[string]string{
+			"GIT_AUTHOR_NAME":     author,
+			"GIT_AUTHOR_EMAIL":    authorEmail,
+			"GIT_AUTHOR_DATE":     dateStr,
+			"GIT_COMMITTER_NAME":  "SR Linux Timeline",
+			"GIT_COMMITTER_EMAIL": "timeline@srl-timeline",
+			"GIT_COMMITTER_DATE":  dateStr,
+		}
+
+		_, err = b.runGit([]string{"commit", "-m", message, "--author", authorStr}, env)
+		if err != nil {
+			b.mu.Unlock()
+			return false, "", err
+		}
+
+		sha, _ = b.runGit([]string{"rev-parse", "HEAD"}, nil)
 	}
 
-	_, err = b.runGit([]string{"commit", "-m", message, "--author", authorStr}, env)
-	if err != nil {
-		b.mu.Unlock()
-		return false, "", err
-	}
-
-	sha, _ := b.runGit([]string{"rev-parse", "HEAD"}, nil)
 	if ResolveSharedGID() > 0 {
 		if _, err := os.Stat("/usr/bin/setfacl"); err == nil {
 			_ = exec.Command("/usr/bin/setfacl", "-R", "-m", "g::rwX,g:ntwkuser:rwX,g:ntwkadmin:rwX,g:srlinux:rwX", b.RepoDir).Run()
@@ -480,8 +538,12 @@ func (b *GitBackend) RecordConfigChange(
 func (b *GitBackend) GetTimeline(limit int, filterPath string) []models.TimelineCommit {
 	b.mu.Lock()
 	currentHead, _ := b.runGit([]string{"rev-parse", "--verify", "HEAD"}, nil)
-	if b.timelineCache == nil || currentHead != b.lastHeadSHA {
-		b.loadTimelineCache(limit)
+	cacheLimit := 250
+	if limit > cacheLimit {
+		cacheLimit = limit
+	}
+	if b.timelineCache == nil || currentHead != b.lastHeadSHA || (limit > len(b.timelineCache) && len(b.timelineCache) >= 250) {
+		b.loadTimelineCache(cacheLimit)
 		b.lastHeadSHA = currentHead
 	}
 
@@ -490,6 +552,9 @@ func (b *GitBackend) GetTimeline(limit int, filterPath string) []models.Timeline
 
 	cleanFilter := strings.TrimSpace(filterPath)
 	if cleanFilter == "" {
+		if limit > 0 && len(allCommits) > limit {
+			return allCommits[:limit]
+		}
 		return allCommits
 	}
 
@@ -501,13 +566,16 @@ func (b *GitBackend) GetTimeline(limit int, filterPath string) []models.Timeline
 		}
 		if b.commitMatchesFilterWithParent(c.FullSHA, parentSHA, cleanFilter) {
 			filtered = append(filtered, c)
+			if limit > 0 && len(filtered) >= limit {
+				break
+			}
 		}
 	}
 	return filtered
 }
 
 func (b *GitBackend) loadTimelineCache(limit int) {
-	if limit <= 0 {
+	if limit < 250 {
 		limit = 250
 	}
 	out, err := b.runGit([]string{"rev-parse", "--verify", "HEAD"}, nil)
@@ -618,7 +686,7 @@ func (b *GitBackend) GetConfigAtCommit(commitSHA string) map[string]interface{} 
 
 func (b *GitBackend) getConfigAtCommitInternal(commitSHA string) map[string]interface{} {
 	realSHA := commitSHA
-	if commitSHA == "HEAD" || strings.Contains(commitSHA, "~") || strings.Contains(commitSHA, "^") {
+	if len(commitSHA) < 40 || commitSHA == "HEAD" || strings.Contains(commitSHA, "~") || strings.Contains(commitSHA, "^") {
 		resolved, err := b.runGit([]string{"rev-parse", commitSHA}, nil)
 		if err == nil && resolved != "" {
 			realSHA = resolved
@@ -648,7 +716,7 @@ func (b *GitBackend) GetCLIAtCommit(commitSHA string) string {
 	defer b.mu.Unlock()
 
 	realSHA := commitSHA
-	if commitSHA == "HEAD" || strings.Contains(commitSHA, "~") || strings.Contains(commitSHA, "^") {
+	if len(commitSHA) < 40 || commitSHA == "HEAD" || strings.Contains(commitSHA, "~") || strings.Contains(commitSHA, "^") {
 		resolved, err := b.runGit([]string{"rev-parse", commitSHA}, nil)
 		if err == nil && resolved != "" {
 			realSHA = resolved
@@ -676,7 +744,7 @@ func (b *GitBackend) GetCommitMetadata(commitSHA string) map[string]interface{} 
 
 func (b *GitBackend) getCommitMetadataInternal(commitSHA string) map[string]interface{} {
 	realSHA := commitSHA
-	if commitSHA == "HEAD" || strings.Contains(commitSHA, "~") || strings.Contains(commitSHA, "^") {
+	if len(commitSHA) < 40 || commitSHA == "HEAD" || strings.Contains(commitSHA, "~") || strings.Contains(commitSHA, "^") {
 		resolved, err := b.runGit([]string{"rev-parse", commitSHA}, nil)
 		if err == nil && resolved != "" {
 			realSHA = resolved
@@ -712,7 +780,7 @@ func (b *GitBackend) GetBlameEntriesAtCommit(mode, commitSHA string) []models.Bl
 		commitSHA = "HEAD"
 	}
 	realSHA := commitSHA
-	if commitSHA == "HEAD" || strings.Contains(commitSHA, "~") || strings.Contains(commitSHA, "^") {
+	if len(commitSHA) < 40 || commitSHA == "HEAD" || strings.Contains(commitSHA, "~") || strings.Contains(commitSHA, "^") {
 		if resolved, err := b.runGit([]string{"rev-parse", commitSHA}, nil); err == nil && resolved != "" {
 			realSHA = resolved
 		}
@@ -731,6 +799,12 @@ func (b *GitBackend) GetBlameEntriesAtCommit(mode, commitSHA string) []models.Bl
 	targetPath := filepath.Join(b.RepoDir, filename)
 	if _, err := os.Stat(targetPath); os.IsNotExist(err) {
 		return []models.BlameEntry{}
+	}
+
+	if !hasGitBinary() {
+		entries := b.blameNative(realSHA, filename)
+		b.blameCache[cacheKey] = entries
+		return entries
 	}
 
 	out, err := b.runGit([]string{"blame", "--line-porcelain", realSHA, "--", filename}, nil)

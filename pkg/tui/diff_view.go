@@ -65,6 +65,7 @@ func (m *DiffViewModel) UpdateContent() {
 			Bold(true).
 			Padding(1, 2).
 			Render("✓ No configuration changes for this revision / filter"))
+		m.Viewport.SetYOffset(0)
 		return
 	}
 
@@ -163,6 +164,7 @@ func (m *DiffViewModel) UpdateContent() {
 
 	content := sb.String()
 	m.Viewport.SetContent(content)
+	m.Viewport.SetYOffset(m.Viewport.YOffset)
 }
 
 // View renders the diff viewer box.

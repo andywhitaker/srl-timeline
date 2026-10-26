@@ -65,6 +65,7 @@ func (m *ConfigViewModel) SetSize(width, height int) {
 // UpdateContent syntax highlights and loads the configuration into the viewport.
 func (m *ConfigViewModel) UpdateContent() {
 	if len(m.ConfigData) == 0 {
+		m.lastRendered = ""
 		m.Viewport.SetContent(lipgloss.NewStyle().Foreground(ColorMuted).Padding(1, 2).Render("No configuration data available for this revision."))
 		return
 	}
@@ -84,6 +85,7 @@ func (m *ConfigViewModel) UpdateContent() {
 			lines = filter.FilterCLILines(lines, m.FilterPath)
 		}
 		if len(lines) == 0 {
+			m.lastRendered = ""
 			m.Viewport.SetContent(lipgloss.NewStyle().Foreground(ColorWarning).Padding(1, 2).Render(fmt.Sprintf("No CLI configuration statements match filter '%s'", m.FilterPath)))
 			return
 		}
@@ -113,6 +115,7 @@ func (m *ConfigViewModel) UpdateContent() {
 			data = filter.FilterConfigSubtree(data, m.FilterPath)
 		}
 		if len(data) == 0 {
+			m.lastRendered = ""
 			m.Viewport.SetContent(lipgloss.NewStyle().Foreground(ColorWarning).Padding(1, 2).Render(fmt.Sprintf("No JSON configuration subtrees match filter '%s'", m.FilterPath)))
 			return
 		}
@@ -229,7 +232,7 @@ func (m ConfigViewModel) Update(msg tea.Msg) (ConfigViewModel, tea.Cmd) {
 		case "1":
 			m.FormatMode = "cli"
 			m.UpdateContent()
-		case "2", "j":
+		case "2":
 			m.FormatMode = "json"
 			m.UpdateContent()
 		}

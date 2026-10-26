@@ -1,6 +1,7 @@
 package exporter
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -84,8 +85,8 @@ func (e *ConfigExporter) ExportAsFlatCLI(commitSHA, outputFile string) (string, 
 }
 
 // SaveAsDeviceStartupConfig saves the revision as the SR Linux startup configuration.
-// When saving the active/latest configuration on-box, it uses SR Linux's native "save startup"
-// command so /etc/opt/srlinux/config.json retains its _preamble, module prefixes, and POSIX ACLs.
+// When saving the active/latest configuration on-box, it uses SR Linux's native "/tools/system/configuration/save"
+// JSON-RPC action so /etc/opt/srlinux/config.json retains its _preamble, module prefixes, and POSIX ACLs.
 func (e *ConfigExporter) SaveAsDeviceStartupConfig(commitSHA string) (bool, string, error) {
 	targetFile := "/etc/opt/srlinux/config.json"
 
@@ -98,13 +99,26 @@ func (e *ConfigExporter) SaveAsDeviceStartupConfig(commitSHA string) (bool, stri
 	}
 
 	if isLatest && e.SRLClient != nil && e.SRLClient.IsOnBox {
-		if ok, _, err := e.SRLClient.ExecuteCLI([]string{"save startup"}); err == nil && ok {
+		if ok, err := e.SRLClient.SaveStartupConfig(); err == nil && ok {
 			return true, fmt.Sprintf("Successfully saved revision %s as device startup config (%s)", commitSHA, targetFile), nil
 		}
 	}
 
-	// For historical revisions or off-box fallback, write JSON while preserving existing file mode/ACLs if present
-	cfg := e.GetConfigDict(commitSHA)
+	// For historical revisions or off-box fallback, write JSON while preserving existing _preamble and file mode/ACLs if present
+	rawCfg := e.GetConfigDict(commitSHA)
+	cfg := make(map[string]interface{}, len(rawCfg)+1)
+	for k, v := range rawCfg {
+		cfg[k] = v
+	}
+	if existingBytes, err := os.ReadFile(targetFile); err == nil && len(existingBytes) > 0 {
+		var existingMap map[string]interface{}
+		if json.Unmarshal(existingBytes, &existingMap) == nil {
+			if preamble, ok := existingMap["_preamble"]; ok {
+				cfg["_preamble"] = preamble
+			}
+		}
+	}
+
 	jsonStr, err := normalizer.CanonicalJSONString(cfg, 2)
 	if err != nil {
 		return false, "", fmt.Errorf("failed to serialize startup config: %w", err)

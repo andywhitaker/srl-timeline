@@ -42,3 +42,23 @@ func TestReorderFlags(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractInitialFilter(t *testing.T) {
+	cases := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--filter", "bgp"}, "bgp"},
+		{[]string{"-f", "/interface[name=ethernet-1/1]"}, "/interface[name=ethernet-1/1]"},
+		{[]string{"--filter=network-instance"}, "network-instance"},
+		{[]string{"-f=system"}, "system"},
+		{[]string{}, ""},
+	}
+	for _, tc := range cases {
+		got := extractInitialFilter(tc.args)
+		if got != tc.want {
+			t.Fatalf("extractInitialFilter(%v) = %q, want %q", tc.args, got, tc.want)
+		}
+	}
+}
+

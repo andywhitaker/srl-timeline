@@ -825,3 +825,238 @@ func TestCherryPickModalCompositeListExpansion(t *testing.T) {
 	}
 }
 
+func TestTUIBugFixes(t *testing.T) {
+	tempDir := t.TempDir()
+	repoDir := filepath.Join(tempDir, "repo")
+	backend := gitbackend.NewGitBackend(repoDir)
+
+	var ifList []interface{}
+	for i := 1; i <= 30; i++ {
+		ifList = append(ifList, map[string]interface{}{
+			"name":        "ethernet-1/" + string(rune('0'+i%10)),
+			"description": strings.Repeat("PortDescription", 6),
+			"admin-state": "enable",
+		})
+	}
+	cfg1 := map[string]interface{}{
+		"system":    map[string]interface{}{"name": map[string]interface{}{"host-name": "srl1"}},
+		"interface": ifList,
+	}
+	cfg2 := map[string]interface{}{
+		"system":    map[string]interface{}{"name": map[string]interface{}{"host-name": "srl2"}},
+		"interface": ifList,
+	}
+	_, _, _ = backend.RecordConfigChange(cfg1, "admin", "1", "", time.Now().UTC(), "Commit 1", nil)
+	_, _, _ = backend.RecordConfigChange(cfg2, "admin", "2", "", time.Now().UTC(), "Commit 2", nil)
+
+	model := NewAppModel(backend, nil, "")
+	resModel, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	app := resModel.(AppModel)
+
+	// 1. Verify resizeLayout updates modal dimensions
+	if app.HelpModal.Width != 120 || app.HelpModal.Height != 24 {
+		t.Fatalf("expected HelpModal dimensions 120x24, got %dx%d", app.HelpModal.Width, app.HelpModal.Height)
+	}
+
+	// 2. Switch to TabConfig ('c'), keep focus in PaneTimeline, press 'j' -> navigates commit instead of switching to JSON mode
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	app = resModel.(AppModel)
+	if app.ConfigView.FormatMode != "cli" {
+		t.Fatalf("expected FormatMode=cli initially")
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	app = resModel.(AppModel)
+	if app.ConfigView.FormatMode != "cli" {
+		t.Fatalf("expected 'j' not to hijack FormatMode to json")
+	}
+	if app.TimelineView.SelectedIndex != 1 {
+		t.Fatalf("expected 'j' in PaneTimeline to advance SelectedIndex to 1, got %d", app.TimelineView.SelectedIndex)
+	}
+
+	// 3. Focus PaneDetail (Tab), press 'j' and Space (' ') -> scrolls viewport down in TabConfig
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyTab})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	app = resModel.(AppModel)
+	if app.ConfigView.Viewport.YOffset == 0 {
+		t.Fatalf("expected 'j' in PaneDetail TabConfig to scroll down, got YOffset=0")
+	}
+	offsetAfterJ := app.ConfigView.Viewport.YOffset
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	app = resModel.(AppModel)
+	if app.ConfigView.Viewport.YOffset <= offsetAfterJ {
+		t.Fatalf("expected Space key in PaneDetail to page down, got %d <= %d", app.ConfigView.Viewport.YOffset, offsetAfterJ)
+	}
+
+	// 4. Test mouse click hit-boxes when Notification banner is active (shifts Y down by 1)
+	app.Notification = "Test notification banner"
+	timelineW := (120 * 38) / 100
+	// Click Top Tab Diff View at Y = 5 (4 + notifExtra)
+	resModel, _ = app.Update(tea.MouseMsg{X: timelineW + 5, Y: 5, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.ActiveTab != TabDiff {
+		t.Fatalf("expected click at Y=5 (with notification banner) to select TabDiff, got %v", app.ActiveTab)
+	}
+	// Click [3] CLI sub-option in TabDiff at Y = 7 (6 + notifExtra), X = timelineW + 30
+	resModel, _ = app.Update(tea.MouseMsg{X: timelineW + 30, Y: 7, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.DiffView.DiffMode != "cli" {
+		t.Fatalf("expected click at X=timelineW+30, Y=7 (with notification banner) to select DiffMode=cli, got %q", app.DiffView.DiffMode)
+	}
+
+	// 5. Test CherryPickModal mouse wheel scrolling via AppModel.Update
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	app = resModel.(AppModel)
+	if app.ActiveModal != ModalCherryPick {
+		t.Fatalf("expected ModalCherryPick to open on 'p'")
+	}
+	resModel, _ = app.Update(tea.MouseMsg{X: 50, Y: 10, Type: tea.MouseWheelDown})
+	app = resModel.(AppModel)
+	if app.CherryPickModal.SelectedIndex == 0 && len(app.CherryPickModal.VisibleNodes) > 1 {
+		t.Fatalf("expected MouseWheelDown in ModalCherryPick to advance SelectedIndex")
+	}
+
+	// 6. Test RemoteModal spacebar (' ') toggle on AutoPush
+	rm := modals.NewRemoteModal(models.RemoteRepoConfig{}, 120, 30)
+	rm, _, _, _ = rm.Update(tea.KeyMsg{Type: tea.KeyTab}) // focus index 1 (AutoPush)
+	rm, _, _, _ = rm.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	if !rm.AutoPush {
+		t.Fatalf("expected Space key (' ') to toggle AutoPush in RemoteModal")
+	}
+}
+
+func TestReviewerModalInputsAndFilterRecovery(t *testing.T) {
+	// 1. CherryPickModal CustomInput must accept all characters without swallowing 'a', 'e', 'f', 'h', 'j', 'k', 'l', 'x', etc.
+	changes := []models.PathChange{
+		{Path: "/interface[name=ethernet-1/1]/description", DiffType: models.DiffModified, NewValue: "Port 1"},
+	}
+	commit := models.TimelineCommit{CommitID: "abc12345", Message: "Test"}
+	cm := modals.NewCherryPickModal(commit, changes, nil, 120, 40)
+	cm, _, _ = cm.Update(tea.KeyMsg{Type: tea.KeyTab}) // switch to UseCustom
+	if !cm.UseCustom {
+		t.Fatalf("expected UseCustom=true after Tab")
+	}
+	targetXPath := "/interface[name=ethernet-1/1]/subinterface[index=0]"
+	for _, r := range targetXPath {
+		cm, _, _ = cm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if cm.CustomInput.Value() != targetXPath {
+		t.Fatalf("CherryPickModal CustomInput swallowed characters: got %q, want %q", cm.CustomInput.Value(), targetXPath)
+	}
+	selected := cm.GetSelectedPaths()
+	if len(selected) != 1 || selected[0] != targetXPath {
+		t.Fatalf("expected GetSelectedPaths() = [%q], got %v", targetXPath, selected)
+	}
+
+	// 2. ExportModal PathInput must be focused on creation and accept typed paths, while 1/2/3/up/down/tab switch format cleanly
+	em := modals.NewExportModal(commit, 120, 40)
+	em, _, _, _ = em.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	if em.Format != "cli" || em.PathInput.Value() != "" {
+		t.Fatalf("expected Format=cli and empty PathInput after '2', got fmt=%q val=%q", em.Format, em.PathInput.Value())
+	}
+	em, _, _, _ = em.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if em.Format != "startup" {
+		t.Fatalf("expected Format=startup after Down arrow, got %q", em.Format)
+	}
+	em, _, _, _ = em.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	targetFile := "/tmp/export_123.json"
+	for _, r := range targetFile {
+		em, _, _, _ = em.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if em.PathInput.Value() != targetFile {
+		t.Fatalf("ExportModal PathInput failed to capture typed path: got %q, want %q", em.PathInput.Value(), targetFile)
+	}
+
+	// 3. ConfigView and BlameView must recover full content after clearing a non-matching filter
+	tempDir := t.TempDir()
+	backend := gitbackend.NewGitBackend(filepath.Join(tempDir, "repo"))
+	cfg := map[string]interface{}{
+		"system": map[string]interface{}{
+			"name": map[string]interface{}{"host-name": "srl-filter-test"},
+		},
+	}
+	_, _, err := backend.RecordConfigChange(cfg, "admin", "1", "", time.Now().UTC(), "Commit — with em-dash", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	model := NewAppModel(backend, nil, "")
+	resModel, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	app := resModel.(AppModel)
+
+	// Verify 80-col timeline row does not wrap past 3 lines and preserves valid UTF-8 for em-dash
+	tvLines := strings.Split(app.TimelineView.Viewport.View(), "\n")
+	nonEmpty := 0
+	for _, l := range tvLines {
+		if strings.TrimSpace(l) != "" {
+			nonEmpty++
+		}
+	}
+	if nonEmpty > 3 {
+		t.Fatalf("expected single commit in 80-col TimelineView to occupy at most 3 non-empty lines, got %d:\n%s", nonEmpty, app.TimelineView.Viewport.View())
+	}
+
+	resModel, _ = app.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	app = resModel.(AppModel)
+
+	// Switch to TabConfig and apply non-matching filter, then clear it
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	app = resModel.(AppModel)
+	app.ConfigView.FilterPath = "/nonexistent_xyz"
+	app.ConfigView.UpdateContent()
+	if !strings.Contains(app.ConfigView.Viewport.View(), "No CLI configuration statements match") {
+		t.Fatalf("expected no-match filter message in ConfigView, got:\n%s", app.ConfigView.Viewport.View())
+	}
+	app.ConfigView.FilterPath = ""
+	app.ConfigView.UpdateContent()
+	if !strings.Contains(app.ConfigView.Viewport.View(), "srl-filter-test") {
+		t.Fatalf("ConfigView failed to restore content after clearing non-matching filter, got:\n%s", app.ConfigView.Viewport.View())
+	}
+
+	// Same for BlameView (empty entries -> populated entries recovery)
+	app.BlameView.SetBlame(nil, app.BlameView.Stats)
+	if !strings.Contains(app.BlameView.Viewport.View(), "No blame entries available") {
+		t.Fatalf("expected empty blame message in BlameView")
+	}
+	app.BlameView.SetBlame([]models.BlameEntry{
+		{CommitSHA: "1234567", Author: "admin", Timestamp: time.Now().UTC(), Content: "set / system name host-name srl-filter-test — ok"},
+	}, app.BlameView.Stats)
+	if !strings.Contains(app.BlameView.Viewport.View(), "1234567") || !strings.Contains(app.BlameView.Viewport.View(), "set / system name host-name") {
+		t.Fatalf("BlameView failed to restore content after empty entries, got:\n%s", app.BlameView.Viewport.View())
+	}
+
+	// 4. Test TabConfig sub-option mouse click on [2] JSON at X = timelineW + 21, Y = 6
+	app.Notification = ""
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	app = resModel.(AppModel)
+	timelineW := (120 * 38) / 100
+	resModel, _ = app.Update(tea.MouseMsg{X: timelineW + 21, Y: 6, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.ConfigView.FormatMode != "json" {
+		t.Fatalf("expected click at X=timelineW+21, Y=6 in TabConfig to select FormatMode=json, got %q", app.ConfigView.FormatMode)
+	}
+
+	// 5. Test in-flight restore/cherry-pick guard (isRestoring)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	app = resModel.(AppModel)
+	if app.ActiveModal != ModalRestore {
+		t.Fatalf("expected ModalRestore to open on 'r'")
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	app = resModel.(AppModel)
+	if !app.isRestoring {
+		t.Fatalf("expected isRestoring=true while restore command is in flight")
+	}
+	// Attempting to open Restore or CherryPick while isRestoring is true must be blocked
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	app = resModel.(AppModel)
+	if app.ActiveModal != ModalNone {
+		t.Fatalf("expected ModalCherryPick to be blocked while isRestoring=true")
+	}
+	// Receiving NotificationMsg clears isRestoring
+	resModel, _ = app.Update(NotificationMsg{Message: "Restored", Severity: "success"})
+	app = resModel.(AppModel)
+	if app.isRestoring {
+		t.Fatalf("expected isRestoring=false after NotificationMsg completion")
+	}
+}

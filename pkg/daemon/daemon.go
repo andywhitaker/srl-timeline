@@ -20,6 +20,7 @@ import (
 
 const (
 	DefaultPIDFile  = "/var/run/timeline_daemon.pid"
+	SharedPIDFile   = "/etc/opt/srlinux/timeline/timeline_daemon.pid"
 	FallbackPIDFile = "/tmp/timeline_daemon.pid"
 	DefaultLockFile = "/etc/opt/srlinux/timeline/timeline.lock"
 )
@@ -32,17 +33,31 @@ func FallbackLockFile() string {
 
 // TryAcquireRecordLock attempts to acquire a non-blocking exclusive file lock for recording commits.
 func TryAcquireRecordLock() (func(), bool) {
-	return acquireLockInternal(syscall.LOCK_EX | syscall.LOCK_NB)
+	return acquireLockInternal("", syscall.LOCK_EX|syscall.LOCK_NB)
+}
+
+// TryAcquireRepoRecordLock attempts to acquire a non-blocking exclusive file lock scoped to repoDir.
+func TryAcquireRepoRecordLock(repoDir string) (func(), bool) {
+	return acquireLockInternal(repoDir, syscall.LOCK_EX|syscall.LOCK_NB)
 }
 
 // AcquireRecordLock acquires a blocking exclusive file lock for synchronous restore/cherry-pick commits.
 func AcquireRecordLock() func() {
-	unlock, _ := acquireLockInternal(syscall.LOCK_EX)
+	unlock, _ := acquireLockInternal("", syscall.LOCK_EX)
 	return unlock
 }
 
-func acquireLockInternal(flockFlags int) (func(), bool) {
+// AcquireRepoRecordLock acquires a blocking exclusive file lock scoped to repoDir.
+func AcquireRepoRecordLock(repoDir string) func() {
+	unlock, _ := acquireLockInternal(repoDir, syscall.LOCK_EX)
+	return unlock
+}
+
+func acquireLockInternal(repoDir string, flockFlags int) (func(), bool) {
 	lockPath := DefaultLockFile
+	if repoDir != "" {
+		lockPath = filepath.Join(filepath.Dir(repoDir), "timeline.lock")
+	}
 	lockDir := filepath.Dir(lockPath)
 	_ = os.MkdirAll(lockDir, os.ModeSetgid|0775)
 	gitbackend.ApplySharedDirPermissions(lockDir)
@@ -83,6 +98,9 @@ type TimelineDaemon struct {
 	lastChange       string
 	isRunning        bool
 	initializedWatch bool
+	lastCommitID     string
+	lastCommitEnded  string
+	lastCommitState  *srlclient.CommitLog
 	lastConfigMtime  time.Time
 	lastConfigSize   int64
 	lastLogInode     uint64
@@ -122,8 +140,24 @@ func (d *TimelineDaemon) notifyListeners(commit models.TimelineCommit) {
 	}
 }
 
+func (d *TimelineDaemon) repoDir() string {
+	if d.GitBackend != nil {
+		return d.GitBackend.RepoDir
+	}
+	return ""
+}
+
 // CaptureInitialState records baseline if repository is empty.
 func (d *TimelineDaemon) CaptureInitialState() {
+	unlock, acquired := TryAcquireRepoRecordLock(d.repoDir())
+	if !acquired {
+		return
+	}
+	defer unlock()
+	d.captureInitialStateLocked()
+}
+
+func (d *TimelineDaemon) captureInitialStateLocked() {
 	if d.GitBackend.HasCommits() {
 		return
 	}
@@ -153,6 +187,10 @@ func (d *TimelineDaemon) Start() {
 	d.isRunning = true
 	d.stopChan = make(chan struct{})
 	d.mu.Unlock()
+
+	if d.SRLClient != nil && d.SRLClient.IsOnBox && os.Geteuid() == 0 {
+		_ = d.SRLClient.EnsureUnixSocket()
+	}
 
 	d.CaptureInitialState()
 
@@ -184,9 +222,23 @@ func (d *TimelineDaemon) monitorLoop() {
 	}
 }
 
-// hasNewCommitEvent checks whether /var/log/srlinux/buffer/messages has a new commitSucceeded event
-// or /etc/opt/srlinux/config.json was modified, avoiding expensive sr_cli polling on idle ticks.
+// hasNewCommitEvent queries /system/configuration/commit in the state datastore via native JSON-RPC
+// as the primary commit trigger, falling back to config/log file watch only when state is unavailable.
 func (d *TimelineDaemon) hasNewCommitEvent() bool {
+	d.lastCommitState = nil
+	if d.SRLClient != nil && d.ConfigWatchPath == "" && len(d.LogWatchPaths) == 0 {
+		if stateCommit, ok := d.SRLClient.GetLatestCommitState(); ok {
+			d.lastCommitState = &stateCommit
+			if !d.initializedWatch || stateCommit.CommitID != d.lastCommitID || stateCommit.Timestamp != d.lastCommitEnded {
+				d.initializedWatch = true
+				d.lastCommitID = stateCommit.CommitID
+				d.lastCommitEnded = stateCommit.Timestamp
+				return true
+			}
+			return false
+		}
+	}
+
 	if !d.SRLClient.IsOnBox {
 		return true
 	}
@@ -257,7 +309,8 @@ func (d *TimelineDaemon) hasNewCommitEvent() bool {
 					buf, readErr := io.ReadAll(f)
 					if readErr == nil {
 						d.lastLogOffset = readOffset + int64(len(buf))
-						if strings.Contains(string(buf), "commitSucceeded") {
+						s := string(buf)
+						if strings.Contains(s, "commitSucceeded") || strings.Contains(s, "committed successfully by user") {
 							changed = true
 						}
 					}
@@ -271,7 +324,7 @@ func (d *TimelineDaemon) hasNewCommitEvent() bool {
 }
 
 func (d *TimelineDaemon) checkAndRecordChange() {
-	unlock, acquired := TryAcquireRecordLock()
+	unlock, acquired := TryAcquireRepoRecordLock(d.repoDir())
 	if !acquired {
 		// Another daemon or TUI/CLI restore instance is actively checking/recording
 		return
@@ -280,29 +333,57 @@ func (d *TimelineDaemon) checkAndRecordChange() {
 
 	// If repository has no baseline commit yet, capture it now!
 	if !d.GitBackend.HasCommits() {
-		d.CaptureInitialState()
+		d.captureInitialStateLocked()
 		return
 	}
+
+	prevInit := d.initializedWatch
+	prevID := d.lastCommitID
+	prevEnded := d.lastCommitEnded
+	prevMtime := d.lastConfigMtime
+	prevSize := d.lastConfigSize
+	prevLogOffset := d.lastLogOffset
 
 	if !d.hasNewCommitEvent() {
 		return
 	}
 
+	restoreWatchCursor := func() {
+		d.initializedWatch = prevInit
+		d.lastCommitID = prevID
+		d.lastCommitEnded = prevEnded
+		d.lastConfigMtime = prevMtime
+		d.lastConfigSize = prevSize
+		d.lastLogOffset = prevLogOffset
+	}
+
 	runningCfg, err := d.SRLClient.GetRunningConfig("/")
 	if err != nil || len(runningCfg) == 0 {
+		restoreWatchCursor()
 		return
 	}
 
-	// Correlate author and session from system logs
+	// Correlate author, commit ID, comment, and timestamp from native /system/configuration/commit state
 	author := "admin"
 	sessionID := ""
 	commitID := ""
 	comment := ""
 	commitTime := time.Now().UTC()
 
-	logs := d.SRLClient.GetCommitLogs(3)
-	if len(logs) > 0 {
-		latest := logs[0]
+	var latest srlclient.CommitLog
+	hasLatest := false
+	if d.lastCommitState != nil {
+		latest = *d.lastCommitState
+		hasLatest = true
+	} else if st, ok := d.SRLClient.GetLatestCommitState(); ok {
+		latest = st
+		hasLatest = true
+	} else if logs := d.SRLClient.GetCommitLogs(1); len(logs) > 0 {
+		latest = logs[0]
+		hasLatest = true
+	}
+
+	if hasLatest {
 		if latest.Username != "" {
 			author = latest.Username
 		}
@@ -336,8 +417,16 @@ func (d *TimelineDaemon) checkAndRecordChange() {
 		"",
 		meta,
 	)
+	if err != nil {
+		restoreWatchCursor()
+		return
+	}
 
-	if err == nil && recorded && sha != "" {
+	if recorded && sha != "" {
+		if tl := d.GitBackend.GetTimeline(1, ""); len(tl) > 0 && tl[0].FullSHA == sha {
+			d.notifyListeners(tl[0])
+			return
+		}
 		shortSHA := sha
 		if len(shortSHA) > 8 {
 			shortSHA = shortSHA[:8]
@@ -363,40 +452,80 @@ func (d *TimelineDaemon) checkAndRecordChange() {
 	}
 }
 
-// WriteCurrentPIDFile writes the current process PID to DefaultPIDFile or FallbackPIDFile.
+// WriteCurrentPIDFile writes the current process PID to DefaultPIDFile, SharedPIDFile, or FallbackPIDFile.
 func WriteCurrentPIDFile() string {
-	pidFile := DefaultPIDFile
-	_ = os.MkdirAll(filepath.Dir(pidFile), 0755)
 	pidStr := strconv.Itoa(os.Getpid())
-	if err := os.WriteFile(pidFile, []byte(pidStr), 0644); err != nil {
-		pidFile = FallbackPIDFile
-		_ = os.WriteFile(pidFile, []byte(pidStr), 0644)
+	var chosen string
+
+	_ = os.MkdirAll(filepath.Dir(DefaultPIDFile), 0755)
+	if err := os.WriteFile(DefaultPIDFile, []byte(pidStr), 0644); err == nil {
+		chosen = DefaultPIDFile
 	}
-	return pidFile
+
+	sharedDir := filepath.Dir(SharedPIDFile)
+	if info, err := os.Stat(sharedDir); err == nil && info.IsDir() {
+		if err := os.WriteFile(SharedPIDFile, []byte(pidStr), 0664); err == nil {
+			gitbackend.ApplySharedFilePermissions(SharedPIDFile)
+			if chosen == "" {
+				chosen = SharedPIDFile
+			}
+		}
+	}
+
+	if chosen == "" {
+		chosen = FallbackPIDFile
+		_ = os.WriteFile(FallbackPIDFile, []byte(pidStr), 0644)
+	}
+	return chosen
 }
 
-// RemoveOwnPIDFile removes DefaultPIDFile or FallbackPIDFile only if it contains the current process PID.
+// RemoveOwnPIDFile removes PID files only if they contain the current process PID.
 func RemoveOwnPIDFile() {
 	pidStr := strconv.Itoa(os.Getpid())
-	for _, pf := range []string{DefaultPIDFile, FallbackPIDFile} {
+	for _, pf := range []string{DefaultPIDFile, SharedPIDFile, FallbackPIDFile} {
 		if data, err := os.ReadFile(pf); err == nil && strings.TrimSpace(string(data)) == pidStr {
 			_ = os.Remove(pf)
 		}
 	}
 }
 
-// ManageDaemonProcess handles start/stop/status CLI actions.
+// IsAnyDaemonRunning checks all candidate PID files for an active daemon process.
+func IsAnyDaemonRunning() (bool, string, string) {
+	for _, pf := range []string{DefaultPIDFile, SharedPIDFile, FallbackPIDFile} {
+		if IsDaemonRunning(pf) {
+			data, _ := os.ReadFile(pf)
+			return true, strings.TrimSpace(string(data)), pf
+		}
+	}
+	return false, "", ""
+}
+
+// ManageDaemonProcess handles start/stop/status/bootstrap CLI actions.
 func ManageDaemonProcess(action string) error {
 	switch action {
+	case "bootstrap":
+		client := srlclient.NewSRLClient()
+		_ = client.EnsureUnixSocket()
+		d := NewTimelineDaemon(client, nil)
+		d.CaptureInitialState()
+		_, _ = client.SaveStartupConfig()
+		_, reloadErr := client.ReloadAppMgr()
+		return reloadErr
+
 	case "start":
-		if IsDaemonRunning(DefaultPIDFile) || IsDaemonRunning(FallbackPIDFile) {
+		if running, _, _ := IsAnyDaemonRunning(); running {
 			fmt.Println("Timeline daemon is already running.")
 			return nil
 		}
-		d := NewTimelineDaemon(nil, nil)
-		d.Start()
 		pid := os.Getpid()
 		pidFile := WriteCurrentPIDFile()
+		defer func() {
+			RemoveOwnPIDFile()
+			_ = os.Remove(pidFile)
+		}()
+
+		d := NewTimelineDaemon(nil, nil)
+		d.Start()
 		fmt.Printf("Started Timeline daemon (PID %d)\n", pid)
 
 		// Wait for signal
@@ -404,22 +533,24 @@ func ManageDaemonProcess(action string) error {
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 		<-sigChan
 		d.Stop()
-		_ = os.Remove(pidFile)
 		fmt.Println("Timeline daemon stopped.")
 		return nil
 
 	case "stop":
-		data, err := os.ReadFile(DefaultPIDFile)
-		targetPIDFile := DefaultPIDFile
-		if err != nil {
-			data, err = os.ReadFile(FallbackPIDFile)
-			targetPIDFile = FallbackPIDFile
+		_, pidStr, _ := IsAnyDaemonRunning()
+		if pidStr == "" {
+			for _, pf := range []string{DefaultPIDFile, SharedPIDFile, FallbackPIDFile} {
+				if data, err := os.ReadFile(pf); err == nil && strings.TrimSpace(string(data)) != "" {
+					pidStr = strings.TrimSpace(string(data))
+					break
+				}
+			}
 		}
-		if err != nil {
+		if pidStr == "" {
 			fmt.Println("Timeline daemon is not running.")
 			return nil
 		}
-		pid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+		pid, _ := strconv.Atoi(pidStr)
 		if pid > 0 {
 			proc, err := os.FindProcess(pid)
 			if err == nil {
@@ -430,16 +561,14 @@ func ManageDaemonProcess(action string) error {
 				fmt.Printf("Stopped Timeline daemon (PID %d)\n", pid)
 			}
 		}
-		_ = os.Remove(targetPIDFile)
+		for _, pf := range []string{DefaultPIDFile, SharedPIDFile, FallbackPIDFile} {
+			_ = os.Remove(pf)
+		}
 		return nil
 
 	case "status":
-		if IsDaemonRunning(DefaultPIDFile) {
-			data, _ := os.ReadFile(DefaultPIDFile)
-			fmt.Printf("Status: RUNNING (PID %s)\n", strings.TrimSpace(string(data)))
-		} else if IsDaemonRunning(FallbackPIDFile) {
-			data, _ := os.ReadFile(FallbackPIDFile)
-			fmt.Printf("Status: RUNNING (PID %s)\n", strings.TrimSpace(string(data)))
+		if running, pidStr, _ := IsAnyDaemonRunning(); running {
+			fmt.Printf("Status: RUNNING (PID %s)\n", pidStr)
 		} else {
 			fmt.Println("Status: STOPPED")
 		}
