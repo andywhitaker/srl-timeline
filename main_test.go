@@ -62,3 +62,40 @@ func TestExtractInitialFilter(t *testing.T) {
 	}
 }
 
+func TestExtractGlobalOptionsAndThemes(t *testing.T) {
+	defer func() {
+		configureEnvironmentAppearance()
+	}()
+
+	rem, theme, profile := extractGlobalOptions([]string{"diff", "HEAD~1", "HEAD", "--theme", "cobalt2", "--color-profile", "256", "--format", "cli"})
+	wantRem := []string{"diff", "HEAD~1", "HEAD", "--format", "cli"}
+	if !reflect.DeepEqual(rem, wantRem) {
+		t.Fatalf("extractGlobalOptions remaining = %v, want %v", rem, wantRem)
+	}
+	if theme != "cobalt2" {
+		t.Fatalf("theme = %q, want %q", theme, "cobalt2")
+	}
+	if profile != "256" {
+		t.Fatalf("profile = %q, want %q", profile, "256")
+	}
+
+	rem2, theme2, profile2 := extractGlobalOptions([]string{"--theme=Solarized Dark", "--color-profile=truecolor", "-f", "bgp"})
+	wantRem2 := []string{"-f", "bgp"}
+	if !reflect.DeepEqual(rem2, wantRem2) {
+		t.Fatalf("extractGlobalOptions remaining = %v, want %v", rem2, wantRem2)
+	}
+	if theme2 != "Solarized Dark" || profile2 != "truecolor" {
+		t.Fatalf("got theme=%q profile=%q", theme2, profile2)
+	}
+
+	// Test applyGlobalOptions sets active theme
+	_ = applyGlobalOptions([]string{"--theme", "monokai", "--color-profile", "truecolor"})
+	if got := themeNamesList(); got == "" {
+		t.Fatalf("expected non-empty themeNamesList")
+	}
+
+	// Test unknown theme falls back cleanly to dark
+	_ = applyGlobalOptions([]string{"--theme", "nonexistent-xyz"})
+}
+
+

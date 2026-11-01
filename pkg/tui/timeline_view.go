@@ -23,7 +23,11 @@ type TimelineViewModel struct {
 
 // NewTimelineViewModel creates a new visual timeline component.
 func NewTimelineViewModel(width, height int) TimelineViewModel {
-	vp := viewport.New(width, height)
+	vpHeight := height - 1
+	if vpHeight < 1 {
+		vpHeight = 1
+	}
+	vp := viewport.New(width, vpHeight)
 	return TimelineViewModel{
 		Commits:       []models.TimelineCommit{},
 		SelectedIndex: 0,
@@ -149,20 +153,31 @@ func (m *TimelineViewModel) SetSize(width, height int) {
 
 // UpdateViewportContent renders the visual tree graph into string content.
 func (m *TimelineViewModel) UpdateViewportContent() {
+	rowW := m.Width
+	if rowW < 1 {
+		rowW = 1
+	}
+
 	if len(m.Commits) == 0 {
-		m.Viewport.SetContent(lipgloss.NewStyle().Foreground(ColorMuted).Padding(1, 2).Render("No commits recorded yet.\nConfiguration changes will appear here in realtime."))
+		emptyMsg := "  No commits recorded yet.\n  Configuration changes will appear here in realtime."
+		m.Viewport.SetContent(PaintSurface(emptyMsg, rowW, 2, ColorBackground, ColorMuted))
 		return
 	}
 
-	var sb strings.Builder
+	var rows []string
 	total := len(m.Commits)
 
 	for i, c := range m.Commits {
 		isSelected := i == m.SelectedIndex
+		rowBg := ColorBackground
+		rowFg := ColorText
+		if isSelected {
+			rowBg = ColorHighlight
+		}
 
 		// Determine graph glyphs
 		var branchGlyph, connectorGlyph string
-		isRoot := (i == total-1)
+		isRoot := (i == total - 1)
 		isHead := (i == 0)
 
 		if isHead {
@@ -188,7 +203,7 @@ func (m *TimelineViewModel) UpdateViewportContent() {
 		// Cursor indicator
 		cursor := "  "
 		if isSelected {
-			cursor = "▶ "
+			cursor = StyleSelectedRow.Render("▶ ")
 		}
 
 		// Author badge styling
@@ -215,6 +230,8 @@ func (m *TimelineViewModel) UpdateViewportContent() {
 		if c.DiffStat != "" && c.DiffStat != "-" {
 			if strings.HasPrefix(c.DiffStat, "+") {
 				statStyled = StyleDiffStatAdd.Render(fmt.Sprintf("[%s]", c.DiffStat))
+			} else if strings.HasPrefix(c.DiffStat, "-") {
+				statStyled = StyleDiffStatDel.Render(fmt.Sprintf("[%s]", c.DiffStat))
 			} else {
 				statStyled = StyleDiffStatMod.Render(fmt.Sprintf("[%s]", c.DiffStat))
 			}
@@ -226,9 +243,6 @@ func (m *TimelineViewModel) UpdateViewportContent() {
 			if lipgloss.Width(headerLine) > m.Width {
 				headerLine = fmt.Sprintf("%s%s %s %s", cursor, nodeStyled, shaStyled, authorStyled)
 			}
-			if lipgloss.Width(headerLine) > m.Width {
-				headerLine = lipgloss.NewStyle().MaxWidth(m.Width).Render(headerLine)
-			}
 		}
 
 		// Format line 2: Connector + Message
@@ -239,27 +253,21 @@ func (m *TimelineViewModel) UpdateViewportContent() {
 		if maxMsgLen > 5 && len(msgRunes) > maxMsgLen {
 			msgStr = string(msgRunes[:maxMsgLen]) + "…"
 		}
-		msgStyled := lipgloss.NewStyle().Foreground(ColorText).Render(msgStr)
+		msgStyled := StyleCommitMessage.Bold(isSelected).Render(msgStr)
 
 		messageLine := fmt.Sprintf("    %s %s", connectorStyled, msgStyled)
-		if m.Width > 0 && lipgloss.Width(messageLine) > m.Width {
-			messageLine = lipgloss.NewStyle().MaxWidth(m.Width).Render(messageLine)
-		}
 
 		// Format line 3: Connector spacing
 		spacingLine := fmt.Sprintf("    %s", connectorStyled)
 
-		// Combine lines
-		rowBlock := fmt.Sprintf("%s\n%s\n%s", headerLine, messageLine, spacingLine)
-		if isSelected {
-			rowBlock = StyleTimelineSelectedRow.Width(m.Width).Render(rowBlock)
-		}
+		line1 := PaintBarLine(headerLine, rowW, rowBg, rowFg)
+		line2 := PaintBarLine(messageLine, rowW, rowBg, rowFg)
+		line3 := PaintBarLine(spacingLine, rowW, rowBg, rowFg)
 
-		sb.WriteString(rowBlock)
-		sb.WriteString("\n")
+		rows = append(rows, fmt.Sprintf("%s\n%s\n%s", line1, line2, line3))
 	}
 
-	m.Viewport.SetContent(sb.String())
+	m.Viewport.SetContent(strings.Join(rows, "\n"))
 }
 
 // View renders the visual timeline component.
@@ -271,8 +279,17 @@ func (m TimelineViewModel) View() string {
 		headerText = " 📜 TIMELINE [FOCUSED] "
 	}
 
-	header := StylePanelHeader.Render(headerText)
-	content := m.Viewport.View()
+	innerW := m.Width
+	if innerW < 1 {
+		innerW = 1
+	}
+	vpH := m.Viewport.Height
+	if vpH < 1 {
+		vpH = 1
+	}
+
+	header := PaintBarLine(StylePanelHeader.Render(headerText), innerW, ColorSurface, ColorText)
+	content := PaintSurface(m.Viewport.View(), innerW, vpH, ColorBackground, ColorText)
 
 	box := borderStyle.
 		Width(m.Width).

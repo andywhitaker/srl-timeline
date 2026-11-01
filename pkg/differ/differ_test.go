@@ -287,3 +287,434 @@ func TestSemanticDiffAddedAndDeletedTopLevelList(t *testing.T) {
 		t.Fatalf("expected filtered changes for deleted top-level interface list, got %+v", resDel.Changes)
 	}
 }
+
+func TestUnifiedDiffBracketAlignmentOnAddedListElementBeforeExisting(t *testing.T) {
+	oldCfg := map[string]interface{}{
+		"interface": []interface{}{
+			map[string]interface{}{
+				"admin-state": "enable",
+				"name":        "mgmt0",
+			},
+		},
+	}
+	newCfg := map[string]interface{}{
+		"interface": []interface{}{
+			map[string]interface{}{
+				"description": "This is a test",
+				"name":        "ethernet-1/1",
+			},
+			map[string]interface{}{
+				"admin-state": "enable",
+				"name":        "mgmt0",
+			},
+		},
+	}
+
+	res := SemanticDiff(oldCfg, newCfg, "")
+	joined := strings.Join(res.UnifiedDiffLines, "\n")
+	wantBlock := strings.Join([]string{
+		"    \"interface\": [",
+		"+     {",
+		"+       \"description\": \"This is a test\",",
+		"+       \"name\": \"ethernet-1/1\"",
+		"+     },",
+		"      {",
+		"        \"admin-state\": \"enable\",",
+	}, "\n")
+	if !strings.Contains(joined, wantBlock) {
+		t.Fatalf("expected added interface block to highlight its own enclosing brackets:\nwant:\n%s\n\ngot:\n%s", wantBlock, joined)
+	}
+}
+
+func TestUnifiedDiffBracketAlignmentOnAddedNestedListElement(t *testing.T) {
+	oldCfg := map[string]interface{}{
+		"interface": []interface{}{
+			map[string]interface{}{
+				"description": "This is a test",
+				"name":        "ethernet-1/1",
+			},
+			map[string]interface{}{
+				"admin-state": "enable",
+				"name":        "mgmt0",
+			},
+		},
+	}
+	newCfg := map[string]interface{}{
+		"interface": []interface{}{
+			map[string]interface{}{
+				"description": "This is a test",
+				"name":        "ethernet-1/1",
+			},
+			map[string]interface{}{
+				"name": "ethernet-1/2",
+				"subinterface": []interface{}{
+					map[string]interface{}{
+						"index": 0,
+						"ipv4": map[string]interface{}{
+							"address": []interface{}{
+								map[string]interface{}{
+									"ip-prefix": "10.1.2.1/24",
+								},
+							},
+							"admin-state": "enable",
+						},
+					},
+				},
+			},
+			map[string]interface{}{
+				"admin-state": "enable",
+				"name":        "mgmt0",
+			},
+		},
+	}
+
+	res := SemanticDiff(oldCfg, newCfg, "")
+	joined := strings.Join(res.UnifiedDiffLines, "\n")
+	if strings.Contains(joined, "+     },\n+     {") {
+		t.Fatalf("expected diff not to highlight closing-then-opening brackets across adjacent items:\n%s", joined)
+	}
+	wantPrefix := strings.Join([]string{
+		"        \"name\": \"ethernet-1/1\"",
+		"      },",
+		"+     {",
+		"+       \"name\": \"ethernet-1/2\",",
+	}, "\n")
+	wantSuffix := strings.Join([]string{
+		"+       ]",
+		"+     },",
+		"      {",
+		"        \"admin-state\": \"enable\",",
+	}, "\n")
+	if !strings.Contains(joined, wantPrefix) || !strings.Contains(joined, wantSuffix) {
+		t.Fatalf("unexpected bracket highlighting around nested added element:\n%s", joined)
+	}
+}
+
+func TestUnifiedDiffBracketAlignmentOnAddedAndDeletedListElementAtEnd(t *testing.T) {
+	oldCfg := map[string]interface{}{
+		"interface": []interface{}{
+			map[string]interface{}{
+				"admin-state": "enable",
+				"name":        "ethernet-1/1",
+			},
+		},
+	}
+	newCfg := map[string]interface{}{
+		"interface": []interface{}{
+			map[string]interface{}{
+				"admin-state": "enable",
+				"name":        "ethernet-1/1",
+			},
+			map[string]interface{}{
+				"admin-state": "enable",
+				"name":        "ethernet-1/2",
+			},
+		},
+	}
+
+	resAdd := SemanticDiff(oldCfg, newCfg, "")
+	joinedAdd := strings.Join(resAdd.UnifiedDiffLines, "\n")
+	wantAdd := strings.Join([]string{
+		"        \"name\": \"ethernet-1/1\"",
+		"      },",
+		"+     {",
+		"+       \"admin-state\": \"enable\",",
+		"+       \"name\": \"ethernet-1/2\"",
+		"+     }",
+		"    ]",
+	}, "\n")
+	if !strings.Contains(joinedAdd, wantAdd) {
+		t.Fatalf("expected trailing list addition to highlight enclosing brackets cleanly:\nwant:\n%s\n\ngot:\n%s", wantAdd, joinedAdd)
+	}
+
+	resDel := SemanticDiff(newCfg, oldCfg, "")
+	joinedDel := strings.Join(resDel.UnifiedDiffLines, "\n")
+	wantDel := strings.Join([]string{
+		"        \"name\": \"ethernet-1/1\"",
+		"      }",
+		"-     {",
+		"-       \"admin-state\": \"enable\",",
+		"-       \"name\": \"ethernet-1/2\"",
+		"-     }",
+		"    ]",
+	}, "\n")
+	if !strings.Contains(joinedDel, wantDel) {
+		t.Fatalf("expected trailing list deletion to highlight enclosing brackets cleanly:\nwant:\n%s\n\ngot:\n%s", wantDel, joinedDel)
+	}
+}
+
+func TestUnifiedDiffBracketAlignmentOnSiblingContainers(t *testing.T) {
+	oldCfg := map[string]interface{}{
+		"interface": []interface{}{
+			map[string]interface{}{
+				"name": "ethernet-1/1",
+				"subinterface": []interface{}{
+					map[string]interface{}{
+						"index": 0,
+						"ipv4": map[string]interface{}{
+							"admin-state": "enable",
+						},
+					},
+				},
+			},
+		},
+	}
+	newCfg := map[string]interface{}{
+		"interface": []interface{}{
+			map[string]interface{}{
+				"name": "ethernet-1/1",
+				"subinterface": []interface{}{
+					map[string]interface{}{
+						"index": 0,
+						"ipv4": map[string]interface{}{
+							"admin-state": "enable",
+						},
+						"ipv6": map[string]interface{}{
+							"admin-state": "enable",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	res := SemanticDiff(oldCfg, newCfg, "")
+	joined := strings.Join(res.UnifiedDiffLines, "\n")
+	want := strings.Join([]string{
+		"              \"admin-state\": \"enable\"",
+		"            },",
+		"+           \"ipv6\": {",
+		"+             \"admin-state\": \"enable\"",
+		"+           }",
+		"          }",
+	}, "\n")
+	if !strings.Contains(joined, want) {
+		t.Fatalf("expected added ipv6 sibling container to highlight its own brackets without stealing ipv4 closing brace:\nwant:\n%s\n\ngot:\n%s", want, joined)
+	}
+}
+
+func TestUnifiedDiffBracketAlignmentOnCustomKeyArrayWithAdjacentModification(t *testing.T) {
+	oldCfg := map[string]interface{}{
+		"items": []interface{}{
+			map[string]interface{}{
+				"code":        100,
+				"description": "first",
+			},
+			map[string]interface{}{
+				"code":        200,
+				"description": "second",
+			},
+		},
+	}
+	newCfg := map[string]interface{}{
+		"items": []interface{}{
+			map[string]interface{}{
+				"code":        100,
+				"description": "updated",
+			},
+			map[string]interface{}{
+				"code":        150,
+				"description": "middle",
+			},
+			map[string]interface{}{
+				"code":        200,
+				"description": "second",
+			},
+		},
+	}
+
+	res := SemanticDiff(oldCfg, newCfg, "")
+	joined := strings.Join(res.UnifiedDiffLines, "\n")
+	want := strings.Join([]string{
+		"        \"code\": 100,",
+		"-       \"description\": \"first\"",
+		"+       \"description\": \"updated\"",
+		"      },",
+		"+     {",
+		"+       \"code\": 150,",
+		"+       \"description\": \"middle\"",
+		"+     },",
+		"      {",
+		"        \"code\": 200,",
+	}, "\n")
+	if !strings.Contains(joined, want) {
+		t.Fatalf("expected custom-keyed array with adjacent modification and insertion to align brackets cleanly:\nwant:\n%s\n\ngot:\n%s", want, joined)
+	}
+}
+
+func TestUnifiedDiffBracketAlignmentOnSliderDeleteAndAdjacentModify(t *testing.T) {
+	// Directly exercise compactDiffSliders when a deletion hunk slides right across the end of an array
+	chunks := []diffChunk{
+		{op: diffEqual, line: "    {"},
+		{op: diffEqual, line: "      \"val\": 2"},
+		{op: diffDelete, line: "    },"},
+		{op: diffDelete, line: "    {"},
+		{op: diffDelete, line: "      \"val\": 3"},
+		{op: diffEqual, line: "    }"},
+		{op: diffEqual, line: "  ]"},
+	}
+	slid := compactDiffSliders(chunks)
+	if slid[2].op != diffEqual || slid[2].line != "    }" {
+		t.Fatalf("expected slid[2] to be diffEqual with comma-free '    }', got op=%v line=%q", slid[2].op, slid[2].line)
+	}
+	if slid[3].op != diffDelete || slid[3].line != "    {" || slid[5].op != diffDelete || slid[5].line != "    }" {
+		t.Fatalf("expected slid[3..5] to be deleted '{ ... }', got %+v", slid[3:6])
+	}
+
+	// Also exercise compactDiffSliders when a modification is immediately followed by an inserted block with a stolen closing brace
+	modPlusInsert := []diffChunk{
+		{op: diffEqual, line: "    {"},
+		{op: diffDelete, line: "      \"description\": \"first\""},
+		{op: diffInsert, line: "      \"description\": \"updated\""},
+		{op: diffInsert, line: "    },"},
+		{op: diffInsert, line: "    {"},
+		{op: diffInsert, line: "      \"description\": \"middle\""},
+		{op: diffEqual, line: "    },"},
+	}
+	slidMod := compactDiffSliders(modPlusInsert)
+	if slidMod[3].op != diffEqual || slidMod[3].line != "    }," {
+		t.Fatalf("expected slidMod[3] to become diffEqual '    },', got op=%v line=%q", slidMod[3].op, slidMod[3].line)
+	}
+	if slidMod[4].op != diffInsert || slidMod[4].line != "    {" || slidMod[6].op != diffInsert || slidMod[6].line != "    }," {
+		t.Fatalf("expected slidMod[4..6] to be inserted '{ ... },', got %+v", slidMod[4:7])
+	}
+}
+
+func TestUnifiedDiffBracketAlignmentOnSimultaneousAddDeleteModify(t *testing.T) {
+	oldCfg := map[string]interface{}{
+		"interface": []interface{}{
+			map[string]interface{}{
+				"admin-state": "enable",
+				"description": "old-1",
+				"name":        "ethernet-1/1",
+			},
+			map[string]interface{}{
+				"admin-state": "enable",
+				"description": "to-delete",
+				"name":        "ethernet-1/2",
+			},
+			map[string]interface{}{
+				"admin-state": "enable",
+				"name":        "mgmt0",
+			},
+		},
+	}
+	newCfg := map[string]interface{}{
+		"interface": []interface{}{
+			map[string]interface{}{
+				"admin-state": "enable",
+				"description": "new-1",
+				"name":        "ethernet-1/1",
+			},
+			map[string]interface{}{
+				"admin-state": "enable",
+				"description": "added-3",
+				"name":        "ethernet-1/3",
+			},
+			map[string]interface{}{
+				"admin-state": "enable",
+				"name":        "mgmt0",
+			},
+		},
+	}
+
+	res := SemanticDiff(oldCfg, newCfg, "")
+	joined := strings.Join(res.UnifiedDiffLines, "\n")
+	want := strings.Join([]string{
+		"        \"admin-state\": \"enable\",",
+		"-       \"description\": \"old-1\",",
+		"+       \"description\": \"new-1\",",
+		"        \"name\": \"ethernet-1/1\"",
+		"      },",
+		"-     {",
+		"-       \"admin-state\": \"enable\",",
+		"-       \"description\": \"to-delete\",",
+		"-       \"name\": \"ethernet-1/2\"",
+		"-     },",
+		"+     {",
+		"+       \"admin-state\": \"enable\",",
+		"+       \"description\": \"added-3\",",
+		"+       \"name\": \"ethernet-1/3\"",
+		"+     },",
+		"      {",
+		"        \"admin-state\": \"enable\",",
+	}, "\n")
+	if !strings.Contains(joined, want) {
+		t.Fatalf("expected simultaneous modify, delete, and add to align all brackets properly:\nwant:\n%s\n\ngot:\n%s", want, joined)
+	}
+}
+
+func TestUnifiedDiffBracketAlignmentOnLargeJSONMyersPath(t *testing.T) {
+	// Build two configs whose midOld * midNew exceeds 250,000 lines (~550 lines each between first and last change)
+	var oldIfaces, newIfaces []interface{}
+	oldIfaces = append(oldIfaces, map[string]interface{}{
+		"admin-state": "enable",
+		"description": "first-old",
+		"name":        "ethernet-1/01",
+	})
+	newIfaces = append(newIfaces, map[string]interface{}{
+		"admin-state": "enable",
+		"description": "first-new",
+		"name":        "ethernet-1/01",
+	})
+	newIfaces = append(newIfaces, map[string]interface{}{
+		"admin-state": "enable",
+		"description": "inserted-early",
+		"name":        "ethernet-1/01a",
+	})
+
+	for i := 2; i <= 120; i++ {
+		item := map[string]interface{}{
+			"admin-state": "enable",
+			"description": fmt.Sprintf("port-%03d", i),
+			"mtu":         9212,
+			"name":        fmt.Sprintf("ethernet-1/%03d", i),
+		}
+		oldIfaces = append(oldIfaces, item)
+		newIfaces = append(newIfaces, item)
+	}
+
+	oldIfaces = append(oldIfaces, map[string]interface{}{
+		"admin-state": "enable",
+		"description": "last-old",
+		"name":        "mgmt0",
+	})
+	newIfaces = append(newIfaces, map[string]interface{}{
+		"admin-state": "enable",
+		"description": "inserted-before-mgmt0",
+		"name":        "ethernet-1/999",
+	})
+	newIfaces = append(newIfaces, map[string]interface{}{
+		"admin-state": "enable",
+		"description": "last-new",
+		"name":        "mgmt0",
+	})
+
+	oldCfg := map[string]interface{}{"interface": oldIfaces}
+	newCfg := map[string]interface{}{"interface": newIfaces}
+
+	res := SemanticDiff(oldCfg, newCfg, "")
+	joined := strings.Join(res.UnifiedDiffLines, "\n")
+	wantEarly := strings.Join([]string{
+		"+     {",
+		"+       \"admin-state\": \"enable\",",
+		"+       \"description\": \"inserted-early\",",
+		"+       \"name\": \"ethernet-1/01a\"",
+		"+     },",
+	}, "\n")
+	wantLate := strings.Join([]string{
+		"+     {",
+		"+       \"admin-state\": \"enable\",",
+		"+       \"description\": \"inserted-before-mgmt0\",",
+		"+       \"name\": \"ethernet-1/999\"",
+		"+     },",
+		"      {",
+		"        \"admin-state\": \"enable\",",
+		"-       \"description\": \"last-old\",",
+		"+       \"description\": \"last-new\",",
+	}, "\n")
+	if !strings.Contains(joined, wantEarly) || !strings.Contains(joined, wantLate) {
+		t.Fatalf("expected large Myers JSON diff to align brackets cleanly:\n%s", joined)
+	}
+}
+

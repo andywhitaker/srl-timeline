@@ -2,12 +2,11 @@ package tui
 
 import (
 	"fmt"
-	"os"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
 
 	"timeline/pkg/blame"
 	"timeline/pkg/daemon"
@@ -108,6 +107,7 @@ type AppModel struct {
 	ActiveTab         ActiveTab
 	Notification      string
 	NotifyStyle       lipgloss.Style
+	notifyKind        string
 	Width             int
 	Height            int
 	FocusFilter       bool
@@ -125,7 +125,6 @@ type AppModel struct {
 
 // NewAppModel initializes the Bubble Tea application model.
 func NewAppModel(backend *gitbackend.GitBackend, client *srlclient.SRLClient, initialFilter string) AppModel {
-	lipgloss.SetHasDarkBackground(true)
 	if backend == nil {
 		backend = gitbackend.NewGitBackend("")
 	}
@@ -185,6 +184,30 @@ func NewAppModel(backend *gitbackend.GitBackend, client *srlclient.SRLClient, in
 	})
 
 	return m
+}
+
+// RefreshTheme re-renders all stateful sub-components after a theme change.
+func (m *AppModel) RefreshTheme() {
+	m.FilterBar.RefreshStyles()
+	StyleTextInput(&m.ExportModal.PathInput, ColorSurface, ColorText, ColorTextDim, ColorActive)
+	StyleTextInput(&m.RemoteModal.URLInput, ColorSurface, ColorText, ColorTextDim, ColorActive)
+	StyleTextInput(&m.CherryPickModal.CustomInput, ColorSurface, ColorText, ColorTextDim, ColorActive)
+	switch m.notifyKind {
+	case "success":
+		m.NotifyStyle = lipgloss.NewStyle().Background(ColorSuccessBg).Foreground(ColorOnAccent).Bold(true).Padding(0, 1)
+	case "error":
+		m.NotifyStyle = lipgloss.NewStyle().Background(ColorDangerBg).Foreground(ColorOnAccent).Bold(true).Padding(0, 1)
+	case "warning":
+		m.NotifyStyle = lipgloss.NewStyle().Background(ColorWarning).Foreground(ColorOnAccent).Bold(true).Padding(0, 1)
+	case "primary":
+		m.NotifyStyle = lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1)
+	}
+	m.TimelineView.UpdateViewportContent()
+	m.DiffView.UpdateContent()
+	m.ConfigView.lastRendered = ""
+	m.ConfigView.UpdateContent()
+	m.BlameView.lastRendered = ""
+	m.BlameView.UpdateContent()
 }
 
 type checkLiveDiskSyncMsg struct{}
@@ -271,10 +294,50 @@ func (m *AppModel) setNotification(text string, style lipgloss.Style) {
 	wasEmpty := m.Notification == ""
 	m.Notification = text
 	m.NotifyStyle = style
+	switch style.GetBackground() {
+	case ColorSuccessBg:
+		m.notifyKind = "success"
+	case ColorDangerBg:
+		m.notifyKind = "error"
+	case ColorWarning:
+		m.notifyKind = "warning"
+	case ColorPrimary:
+		m.notifyKind = "primary"
+	}
 	isEmpty := m.Notification == ""
 	if wasEmpty != isEmpty && m.Width > 0 && m.Height > 0 {
 		m.syncPaneHeights()
 	}
+}
+
+func computeSplitOuterWidths(totalWidth int) (int, int) {
+	timelineOuterWidth := (totalWidth * 38) / 100
+	if timelineOuterWidth < 35 {
+		timelineOuterWidth = 35
+	}
+	if timelineOuterWidth > totalWidth-42 {
+		timelineOuterWidth = totalWidth - 42
+	}
+	if timelineOuterWidth < 20 {
+		timelineOuterWidth = 20
+	}
+
+	detailOuterWidth := totalWidth - timelineOuterWidth - 1
+	if detailOuterWidth < 20 {
+		detailOuterWidth = 20
+	}
+
+	if totalWidth >= 7 && timelineOuterWidth+1+detailOuterWidth > totalWidth {
+		timelineOuterWidth = (totalWidth - 1) / 2
+		if timelineOuterWidth < 3 {
+			timelineOuterWidth = 3
+		}
+		detailOuterWidth = totalWidth - timelineOuterWidth - 1
+		if detailOuterWidth < 3 {
+			detailOuterWidth = 3
+		}
+	}
+	return timelineOuterWidth, detailOuterWidth
 }
 
 func (m *AppModel) syncPaneHeights() {
@@ -296,24 +359,16 @@ func (m *AppModel) syncPaneHeights() {
 		detailPaneHeight = 4
 	}
 
-	timelineOuterWidth := (m.Width * 38) / 100
-	if timelineOuterWidth < 35 {
-		timelineOuterWidth = 35
-	}
-	if timelineOuterWidth > m.Width-42 {
-		timelineOuterWidth = m.Width - 42
-	}
-	if timelineOuterWidth < 20 {
-		timelineOuterWidth = 20
-	}
-
-	detailOuterWidth := m.Width - timelineOuterWidth - 1
-	if detailOuterWidth < 20 {
-		detailOuterWidth = 20
-	}
+	timelineOuterWidth, detailOuterWidth := computeSplitOuterWidths(m.Width)
 
 	timelineInnerWidth := timelineOuterWidth - 2
+	if timelineInnerWidth < 1 {
+		timelineInnerWidth = 1
+	}
 	detailInnerWidth := detailOuterWidth - 2
+	if detailInnerWidth < 1 {
+		detailInnerWidth = 1
+	}
 
 	m.TimelineView.SetSize(timelineInnerWidth, timelinePaneHeight)
 	m.DiffView.SetSize(detailInnerWidth, detailPaneHeight)
@@ -392,7 +447,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if selected != nil && selected.FullSHA == currentHead {
 				m.setNotification(
 					fmt.Sprintf("⚡ Live update by %s: %s", selected.Author, selected.Message),
-					lipgloss.NewStyle().Background(ColorSuccess).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+					lipgloss.NewStyle().Background(ColorSuccessBg).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 				)
 				cmds = append(cmds, clearNotificationCmd())
 			}
@@ -404,7 +459,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.liveConfigFetched = time.Now()
 		m.setNotification(
 			fmt.Sprintf("⚡ Realtime commit by %s: %s", msg.Commit.Author, msg.Commit.Message),
-			lipgloss.NewStyle().Background(ColorSuccess).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+			lipgloss.NewStyle().Background(ColorSuccessBg).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 		)
 		cmds = append(cmds, clearNotificationCmd())
 		m.refreshTimeline()
@@ -415,11 +470,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var style lipgloss.Style
 		switch msg.Severity {
 		case "error":
-			style = lipgloss.NewStyle().Background(ColorDanger).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+			style = lipgloss.NewStyle().Background(ColorDangerBg).Foreground(ColorOnAccent).Bold(true).Padding(0, 1)
 		case "warning":
-			style = lipgloss.NewStyle().Background(ColorWarning).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+			style = lipgloss.NewStyle().Background(ColorWarning).Foreground(ColorOnAccent).Bold(true).Padding(0, 1)
 		default:
-			style = lipgloss.NewStyle().Background(ColorSuccess).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+			style = lipgloss.NewStyle().Background(ColorSuccessBg).Foreground(ColorOnAccent).Bold(true).Padding(0, 1)
 		}
 		m.setNotification(msg.Message, style)
 		m.refreshTimeline()
@@ -555,11 +610,21 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.Daemon.Stop()
 			return m, tea.Quit
 
+		case "T":
+			t := NextTheme()
+			m.RefreshTheme()
+			m.setNotification(
+				fmt.Sprintf("Theme: %s (%s) — press [T] to cycle", t.DisplayName, t.Name),
+				lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
+			)
+			cmds = append(cmds, clearNotificationCmd())
+			return m, tea.Batch(cmds...)
+
 		case "r":
 			if m.isRestoring {
 				m.setNotification(
 					"Restore/cherry-pick operation already in progress...",
-					lipgloss.NewStyle().Background(ColorWarning).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+					lipgloss.NewStyle().Background(ColorWarning).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 				)
 				cmds = append(cmds, clearNotificationCmd())
 				return m, tea.Batch(cmds...)
@@ -576,7 +641,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshTimeline()
 			m.setNotification(
 				"Refreshed timeline from disk",
-				lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+				lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 			)
 			cmds = append(cmds, clearNotificationCmd())
 			return m, tea.Batch(cmds...)
@@ -585,7 +650,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.isRestoring {
 				m.setNotification(
 					"Restore/cherry-pick operation already in progress...",
-					lipgloss.NewStyle().Background(ColorWarning).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+					lipgloss.NewStyle().Background(ColorWarning).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 				)
 				cmds = append(cmds, clearNotificationCmd())
 				return m, tea.Batch(cmds...)
@@ -634,7 +699,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.DiffView.UpdateContent()
 				m.setNotification(
 					"Diff Format: UNIFIED [1]",
-					lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+					lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 				)
 				cmds = append(cmds, clearNotificationCmd())
 				return m, tea.Batch(cmds...)
@@ -643,7 +708,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.DiffView.UpdateContent()
 				m.setNotification(
 					"Diff Format: PATH CHANGES [2]",
-					lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+					lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 				)
 				cmds = append(cmds, clearNotificationCmd())
 				return m, tea.Batch(cmds...)
@@ -652,7 +717,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.DiffView.UpdateContent()
 				m.setNotification(
 					"Diff Format: FLAT CLI DIFF [3]",
-					lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+					lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 				)
 				cmds = append(cmds, clearNotificationCmd())
 				return m, tea.Batch(cmds...)
@@ -671,7 +736,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.setNotification(
 					notif,
-					lipgloss.NewStyle().Background(ColorWarning).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+					lipgloss.NewStyle().Background(ColorWarning).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 				)
 				cmds = append(cmds, clearNotificationCmd())
 				m.updateActiveTabContent()
@@ -685,7 +750,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.ConfigView.UpdateContent()
 				m.setNotification(
 					"Config Format: FLAT CLI SYNTAX [1]",
-					lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+					lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 				)
 				cmds = append(cmds, clearNotificationCmd())
 				return m, tea.Batch(cmds...)
@@ -694,7 +759,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.ConfigView.UpdateContent()
 				m.setNotification(
 					"Config Format: JSON HIERARCHY [2]",
-					lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+					lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 				)
 				cmds = append(cmds, clearNotificationCmd())
 				return m, tea.Batch(cmds...)
@@ -814,7 +879,7 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				}
 				m.setNotification(
 					notifyStr,
-					lipgloss.NewStyle().Background(ColorWarning).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+					lipgloss.NewStyle().Background(ColorWarning).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 				)
 				sha := m.CherryPickModal.Commit.FullSHA
 				return m, performCherryPickCmd(m.Restorer, sha, selectedSubtrees...)
@@ -831,16 +896,7 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		notifExtra = 1
 	}
 
-	timelineWidth := (m.Width * 38) / 100
-	if timelineWidth < 35 {
-		timelineWidth = 35
-	}
-	if timelineWidth > m.Width-42 {
-		timelineWidth = m.Width - 42
-	}
-	if timelineWidth < 20 {
-		timelineWidth = 20
-	}
+	timelineWidth, detailOuterWidth := computeSplitOuterWidths(m.Width)
 
 	// 1. Click on Filter Bar (Y == 2 or Y == 3)
 	if (msg.Y == 2 || msg.Y == 3) && msg.Type == tea.MouseLeft {
@@ -865,7 +921,6 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// 2. Click on Top Tab Bar (Y == 4 + notifExtra, X > timelineWidth)
 	if msg.Y == 4+notifExtra && msg.X > timelineWidth && msg.Type == tea.MouseLeft {
 		tabOffset := msg.X - timelineWidth
-		detailOuterWidth := m.Width - timelineWidth - 1
 		diffTitle := "🔍 Diff View [d]"
 		configTitle := "📄 Full Config [c]"
 		blameTitle := "🕵️ Blame View [b]"
@@ -1042,6 +1097,19 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m AppModel) handleModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "T" {
+		canCycleTheme := m.ActiveModal == ModalHelp ||
+			m.ActiveModal == ModalRestore ||
+			(m.ActiveModal == ModalCherryPick && !m.CherryPickModal.UseCustom) ||
+			(m.ActiveModal == ModalExport && m.ExportModal.Format == "startup") ||
+			(m.ActiveModal == ModalRemote && m.RemoteModal.FocusedIndex != 0)
+		if canCycleTheme {
+			NextTheme()
+			m.RefreshTheme()
+			return m, nil
+		}
+	}
+
 	switch m.ActiveModal {
 	case ModalRestore:
 		var confirmed, close bool
@@ -1052,7 +1120,7 @@ func (m AppModel) handleModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.isRestoring = true
 				m.setNotification(
 					"Applying configuration restore to SR Linux switch...",
-					lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+					lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 				)
 				sha := m.RestoreModal.Commit.FullSHA
 				return m, performRestoreCmd(m.Restorer, sha)
@@ -1075,7 +1143,7 @@ func (m AppModel) handleModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				m.setNotification(
 					notifyStr,
-					lipgloss.NewStyle().Background(ColorWarning).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+					lipgloss.NewStyle().Background(ColorWarning).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 				)
 				sha := m.CherryPickModal.Commit.FullSHA
 				return m, performCherryPickCmd(m.Restorer, sha, selectedSubtrees...)
@@ -1092,7 +1160,7 @@ func (m AppModel) handleModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				sha := m.ExportModal.Commit.FullSHA
 				m.setNotification(
 					"Exporting configuration...",
-					lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+					lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 				)
 				return m, performExportCmd(m.Exporter, sha, format, outputPath)
 			}
@@ -1107,12 +1175,12 @@ func (m AppModel) handleModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if err := m.GitBackend.SaveRemoteConfig(m.RemoteModal.Config); err != nil {
 					m.setNotification(
 						fmt.Sprintf("Failed to save remote config: %v", err),
-						lipgloss.NewStyle().Background(ColorDanger).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+						lipgloss.NewStyle().Background(ColorDangerBg).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 					)
 				} else {
 					m.setNotification(
 						"Saved Remote Git configuration",
-						lipgloss.NewStyle().Background(ColorSuccess).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+						lipgloss.NewStyle().Background(ColorSuccessBg).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 					)
 				}
 				return m, clearNotificationCmd()
@@ -1123,14 +1191,14 @@ func (m AppModel) handleModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.ActiveModal = ModalNone
 				m.setNotification(
 					fmt.Sprintf("Failed to save remote config: %v", err),
-					lipgloss.NewStyle().Background(ColorDanger).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+					lipgloss.NewStyle().Background(ColorDangerBg).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 				)
 				return m, clearNotificationCmd()
 			}
 			m.ActiveModal = ModalNone
 			m.setNotification(
 				"Pushing commits to remote repository...",
-				lipgloss.NewStyle().Background(ColorPrimary).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1),
+				lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 			)
 			return m, performPushRemoteCmd(m.GitBackend)
 		}
@@ -1318,17 +1386,7 @@ func (m AppModel) View() string {
 	filterBar := m.FilterBar.View()
 
 	// 3. Tab Navigation Bar
-	timelineOuterWidth := (m.Width * 38) / 100
-	if timelineOuterWidth < 35 {
-		timelineOuterWidth = 35
-	}
-	if timelineOuterWidth > m.Width-42 {
-		timelineOuterWidth = m.Width - 42
-	}
-	if timelineOuterWidth < 20 {
-		timelineOuterWidth = 20
-	}
-	detailOuterWidth := m.Width - timelineOuterWidth - 1
+	_, detailOuterWidth := computeSplitOuterWidths(m.Width)
 
 	diffTitle := "🔍 Diff View [d]"
 	configTitle := "📄 Full Config [c]"
@@ -1352,7 +1410,12 @@ func (m AppModel) View() string {
 		tabBlame = StyleTabActive.Render(blameTitle)
 	}
 
-	tabBar := lipgloss.JoinHorizontal(lipgloss.Center, tabDiff, tabConfig, tabBlame)
+	tabBar := PaintBarLine(
+		lipgloss.JoinHorizontal(lipgloss.Center, tabDiff, tabConfig, tabBlame),
+		detailOuterWidth,
+		ColorBackground,
+		ColorText,
+	)
 
 	// 4. Detail Panel
 	var detailContent string
@@ -1372,17 +1435,38 @@ func (m AppModel) View() string {
 		detailContent,
 	)
 
+	notifExtra := 0
+	if m.Notification != "" {
+		notifExtra = 1
+	}
+	timelinePaneHeight := m.Height - 8 - notifExtra
+	if timelinePaneHeight < 5 {
+		timelinePaneHeight = 5
+	}
+	splitHeight := timelinePaneHeight + 2
+	splitSep := PaintSurface("", 1, splitHeight, ColorBackground, ColorText)
+
 	mainSplit := lipgloss.JoinHorizontal(
 		lipgloss.Top,
 		m.TimelineView.View(),
-		" ",
+		splitSep,
 		detailWithTabs,
 	)
 
 	// 6. Notification Banner (if any)
 	var notifView string
 	if m.Notification != "" {
-		notifView = m.NotifyStyle.Width(m.Width).Render(m.Notification)
+		singleLineNotif := strings.ReplaceAll(strings.ReplaceAll(m.Notification, "\r\n", " "), "\n", " ")
+		notifBg := ColorPrimary
+		if c, ok := m.NotifyStyle.GetBackground().(lipgloss.Color); ok && string(c) != "" {
+			notifBg = c
+		}
+		notifFg := ColorOnAccent
+		if c, ok := m.NotifyStyle.GetForeground().(lipgloss.Color); ok && string(c) != "" {
+			notifFg = c
+		}
+		renderedNotif := m.NotifyStyle.UnsetWidth().Render(singleLineNotif)
+		notifView = PaintBarLine(renderedNotif, m.Width, notifBg, notifFg)
 	}
 
 	// 7. Footer Bar
@@ -1403,29 +1487,25 @@ func (m AppModel) View() string {
 	// Overlay Modals if active
 	switch m.ActiveModal {
 	case ModalRestore:
-		return m.RestoreModal.View()
+		return PaintSurface(m.RestoreModal.View(), m.Width, m.Height, ColorBackground, ColorText)
 	case ModalCherryPick:
-		return m.CherryPickModal.View()
+		return PaintSurface(m.CherryPickModal.View(), m.Width, m.Height, ColorBackground, ColorText)
 	case ModalExport:
-		return m.ExportModal.View()
+		return PaintSurface(m.ExportModal.View(), m.Width, m.Height, ColorBackground, ColorText)
 	case ModalRemote:
-		return m.RemoteModal.View()
+		return PaintSurface(m.RemoteModal.View(), m.Width, m.Height, ColorBackground, ColorText)
 	case ModalHelp:
-		return m.HelpModal.View()
+		return PaintSurface(m.HelpModal.View(), m.Width, m.Height, ColorBackground, ColorText)
 	}
 
-	return baseScreen
+	return PaintSurface(baseScreen, m.Width, m.Height, ColorBackground, ColorText)
 }
 
 // RunTUI launches the Bubble Tea interactive TUI.
 func RunTUI(initialFilter string) error {
-	lipgloss.SetHasDarkBackground(true)
-	if os.Getenv("NO_COLOR") == "" {
-		lipgloss.SetColorProfile(termenv.TrueColor)
-	}
 	p := tea.NewProgram(
 		NewAppModel(nil, nil, initialFilter),
-		tea.WithOutput(termenv.NewOutput(os.Stdout)),
+		tea.WithOutput(lipgloss.DefaultRenderer().Output()),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 		tea.WithMouseAllMotion(),

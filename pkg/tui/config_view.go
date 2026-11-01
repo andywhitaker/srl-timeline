@@ -26,7 +26,7 @@ type ConfigViewModel struct {
 
 // NewConfigViewModel creates a new configuration viewer.
 func NewConfigViewModel(width, height int) ConfigViewModel {
-	vpHeight := height - 3
+	vpHeight := height - 2
 	if vpHeight < 1 {
 		vpHeight = 1
 	}
@@ -53,7 +53,7 @@ func (m *ConfigViewModel) SetSize(width, height int) {
 	m.Width = width
 	m.Height = height
 	m.Viewport.Width = width
-	vpHeight := height - 3
+	vpHeight := height - 2
 	if vpHeight < 1 {
 		vpHeight = 1
 	}
@@ -64,20 +64,25 @@ func (m *ConfigViewModel) SetSize(width, height int) {
 
 // UpdateContent syntax highlights and loads the configuration into the viewport.
 func (m *ConfigViewModel) UpdateContent() {
-	if len(m.ConfigData) == 0 {
-		m.lastRendered = ""
-		m.Viewport.SetContent(lipgloss.NewStyle().Foreground(ColorMuted).Padding(1, 2).Render("No configuration data available for this revision."))
-		return
-	}
-
-	var sb strings.Builder
 	wrapW := m.Viewport.Width
 	if wrapW <= 0 {
 		wrapW = m.Width
 	}
-	if wrapW < 20 {
+	if wrapW <= 0 {
 		wrapW = 20
 	}
+	if wrapW < 4 {
+		wrapW = 4
+	}
+
+	if len(m.ConfigData) == 0 {
+		m.lastRendered = ""
+		msg := lipgloss.NewStyle().Foreground(ColorMuted).Render("  No configuration data available for this revision.")
+		m.Viewport.SetContent(PaintLine("", wrapW, ColorPanel, ColorMuted) + "\n" + PaintLine(msg, wrapW, ColorPanel, ColorMuted))
+		return
+	}
+
+	var sb strings.Builder
 
 	if m.FormatMode == "cli" {
 		lines := normalizer.JSONToFlatCLI(m.ConfigData, "")
@@ -86,26 +91,22 @@ func (m *ConfigViewModel) UpdateContent() {
 		}
 		if len(lines) == 0 {
 			m.lastRendered = ""
-			m.Viewport.SetContent(lipgloss.NewStyle().Foreground(ColorWarning).Padding(1, 2).Render(fmt.Sprintf("No CLI configuration statements match filter '%s'", m.FilterPath)))
+			warn := lipgloss.NewStyle().Foreground(ColorWarning).Render(fmt.Sprintf("  No CLI configuration statements match filter '%s'", m.FilterPath))
+			m.Viewport.SetContent(PaintLine("", wrapW, ColorPanel, ColorWarning) + "\n" + PaintLine(warn, wrapW, ColorPanel, ColorWarning))
 			return
 		}
-		styleIface := lipgloss.NewStyle().Foreground(lipgloss.Color("#79c0ff")).Width(wrapW)
-		styleNet := lipgloss.NewStyle().Foreground(lipgloss.Color("#d2a8ff")).Width(wrapW)
-		styleSys := lipgloss.NewStyle().Foreground(lipgloss.Color("#56d364")).Width(wrapW)
-		styleACL := lipgloss.NewStyle().Foreground(lipgloss.Color("#ffa657")).Width(wrapW)
-		styleDef := lipgloss.NewStyle().Foreground(lipgloss.Color("#e6edf3")).Width(wrapW)
 
 		for _, l := range lines {
 			if strings.HasPrefix(l, "set / interface") {
-				sb.WriteString(styleIface.Render(l))
+				sb.WriteString(PaintLine(StyleConfigInterface.Render(l), wrapW, ColorPanel, ColorSyntaxInterface))
 			} else if strings.HasPrefix(l, "set / network-instance") {
-				sb.WriteString(styleNet.Render(l))
+				sb.WriteString(PaintLine(StyleConfigNetwork.Render(l), wrapW, ColorPanel, ColorSyntaxNetwork))
 			} else if strings.HasPrefix(l, "set / system") {
-				sb.WriteString(styleSys.Render(l))
+				sb.WriteString(PaintLine(StyleConfigSystem.Render(l), wrapW, ColorPanel, ColorSyntaxSystem))
 			} else if strings.HasPrefix(l, "set / acl") {
-				sb.WriteString(styleACL.Render(l))
+				sb.WriteString(PaintLine(StyleConfigACL.Render(l), wrapW, ColorPanel, ColorSyntaxACL))
 			} else {
-				sb.WriteString(styleDef.Render(l))
+				sb.WriteString(PaintLine(StyleConfigDefault.Render(l), wrapW, ColorPanel, ColorText))
 			}
 			sb.WriteString("\n")
 		}
@@ -116,28 +117,27 @@ func (m *ConfigViewModel) UpdateContent() {
 		}
 		if len(data) == 0 {
 			m.lastRendered = ""
-			m.Viewport.SetContent(lipgloss.NewStyle().Foreground(ColorWarning).Padding(1, 2).Render(fmt.Sprintf("No JSON configuration subtrees match filter '%s'", m.FilterPath)))
+			warn := lipgloss.NewStyle().Foreground(ColorWarning).Render(fmt.Sprintf("  No JSON configuration subtrees match filter '%s'", m.FilterPath))
+			m.Viewport.SetContent(PaintLine("", wrapW, ColorPanel, ColorWarning) + "\n" + PaintLine(warn, wrapW, ColorPanel, ColorWarning))
 			return
 		}
 		jsonStr, _ := normalizer.CanonicalJSONString(data, 2)
 		lines := strings.Split(jsonStr, "\n")
-		styleKey := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#79c0ff"))
-		styleVal := lipgloss.NewStyle().Foreground(lipgloss.Color("#a5d6ff"))
-		stylePlain := lipgloss.NewStyle().Foreground(lipgloss.Color("#e6edf3")).Width(wrapW)
-		styleLineWrap := lipgloss.NewStyle().Width(wrapW)
 
 		for _, l := range lines {
 			if strings.Contains(l, ":") {
 				parts := strings.SplitN(l, ":", 2)
-				sb.WriteString(styleLineWrap.Render(styleKey.Render(parts[0]) + ":" + styleVal.Render(parts[1])))
+				styledLine := StyleConfigKey.Render(parts[0]) + StyleConfigPunctuation.Render(":") + StyleConfigValue.Render(parts[1])
+				sb.WriteString(PaintLine(styledLine, wrapW, ColorPanel, ColorTextPrimary))
 			} else {
-				sb.WriteString(stylePlain.Render(l))
+				sb.WriteString(PaintLine(StyleConfigDefault.Render(l), wrapW, ColorPanel, ColorTextPrimary))
 			}
 			sb.WriteString("\n")
 		}
 	}
 
-	sb.WriteString("\n" + lipgloss.NewStyle().Foreground(ColorMuted).Italic(true).Render("─── End of Configuration (All statements loaded) ───") + "\n")
+	sb.WriteString(PaintLine("", wrapW, ColorPanel, ColorMuted) + "\n")
+	sb.WriteString(PaintLine(lipgloss.NewStyle().Foreground(ColorMuted).Italic(true).Render("─── End of Configuration (All statements loaded) ───"), wrapW, ColorPanel, ColorMuted))
 
 	content := sb.String()
 
@@ -155,17 +155,19 @@ func (m *ConfigViewModel) UpdateContent() {
 // View renders the configuration panel with format switchers and scroll indicator.
 func (m ConfigViewModel) View() string {
 	btnActiveStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("#1f6feb")).
-		Foreground(lipgloss.Color("#ffffff")).
+		Background(ColorPrimary).
+		Foreground(ColorOnAccent).
 		Bold(true).
 		Padding(0, 1).
-		MarginRight(1)
+		MarginRight(1).
+		MarginBackground(ColorSurface)
 
 	btnInactiveStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("#21262d")).
-		Foreground(lipgloss.Color("#8b949e")).
+		Background(ColorBadgeBg).
+		Foreground(ColorMuted).
 		Padding(0, 1).
-		MarginRight(1)
+		MarginRight(1).
+		MarginBackground(ColorSurface)
 
 	btnCLI := btnInactiveStyle.Render("[1] Flat CLI")
 	if m.FormatMode == "cli" {
@@ -189,11 +191,11 @@ func (m ConfigViewModel) View() string {
 	pct := int(m.Viewport.ScrollPercent() * 100)
 	var scrollBadge string
 	if m.Viewport.AtTop() {
-		scrollBadge = lipgloss.NewStyle().Background(lipgloss.Color("#21262d")).Foreground(lipgloss.Color("#58a6ff")).Bold(true).Padding(0, 1).Render(fmt.Sprintf("⬆ TOP (Line 1-%d/%d)", botLine, totalLines))
+		scrollBadge = lipgloss.NewStyle().Background(ColorBadgeBg).Foreground(ColorActive).Bold(true).Padding(0, 1).Render(fmt.Sprintf("⬆ TOP (Line 1-%d/%d)", botLine, totalLines))
 	} else if m.Viewport.AtBottom() {
-		scrollBadge = lipgloss.NewStyle().Background(lipgloss.Color("#238636")).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1).Render(fmt.Sprintf("✓ BOTTOM (100%% | Line %d-%d/%d)", topLine, botLine, totalLines))
+		scrollBadge = lipgloss.NewStyle().Background(ColorSuccessBg).Foreground(ColorOnAccent).Bold(true).Padding(0, 1).Render(fmt.Sprintf("✓ BOTTOM (100%% | Line %d-%d/%d)", topLine, botLine, totalLines))
 	} else {
-		scrollBadge = lipgloss.NewStyle().Background(lipgloss.Color("#1f6feb")).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1).Render(fmt.Sprintf("↕ %d%% (Line %d-%d/%d)", pct, topLine, botLine, totalLines))
+		scrollBadge = lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1).Render(fmt.Sprintf("↕ %d%% (Line %d-%d/%d)", pct, topLine, botLine, totalLines))
 	}
 	controls := lipgloss.JoinHorizontal(
 		lipgloss.Center,
@@ -202,11 +204,16 @@ func (m ConfigViewModel) View() string {
 		scrollBadge,
 	)
 
-	controlsBar := lipgloss.NewStyle().
-		Background(lipgloss.Color("#161b22")).
-		Padding(0, 1).
-		Width(m.Width - 2).
-		Render(controls)
+	innerW := m.Width
+	if innerW < 1 {
+		innerW = 1
+	}
+	vpH := m.Viewport.Height
+	if vpH < 1 {
+		vpH = 1
+	}
+
+	controlsBar := PaintBarLine(" "+controls, innerW, ColorSurface, ColorText)
 
 	borderStyle := StyleInactiveBorder
 	headerText := " 📄 FULL CONFIGURATION "
@@ -215,12 +222,13 @@ func (m ConfigViewModel) View() string {
 		headerText = " 📄 FULL CONFIGURATION [FOCUSED] "
 	}
 
-	header := StylePanelHeader.Render(headerText)
+	header := PaintBarLine(StylePanelHeader.Render(headerText), innerW, ColorSurface, ColorText)
+	vpView := PaintSurface(m.Viewport.View(), innerW, vpH, ColorPanel, ColorText)
 
 	return borderStyle.
 		Width(m.Width).
 		Height(m.Height).
-		Render(fmt.Sprintf("%s\n%s\n%s", header, controlsBar, m.Viewport.View()))
+		Render(fmt.Sprintf("%s\n%s\n%s", header, controlsBar, vpView))
 }
 
 // Update handles format toggle key events and viewport scrolling.

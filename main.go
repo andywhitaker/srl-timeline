@@ -19,27 +19,50 @@ import (
 	"timeline/pkg/tui/modals"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
 )
 
 // Version is the current release version of srl-timeline.
-const Version = "0.0.3"
+const Version = "0.0.4"
 
 func init() {
-	lipgloss.SetHasDarkBackground(true)
-	if os.Getenv("NO_COLOR") == "" {
-		lipgloss.SetColorProfile(termenv.TrueColor)
+	configureEnvironmentAppearance()
+}
+
+func configureEnvironmentAppearance() {
+	if os.Getenv("NO_COLOR") != "" {
+		_ = tui.SetColorProfile("ascii")
+	} else if envProfile := strings.TrimSpace(os.Getenv("TIMELINE_COLOR_PROFILE")); envProfile != "" {
+		_ = tui.SetColorProfile(envProfile)
+	} else {
+		_ = tui.SetColorProfile("truecolor")
 	}
+
+	if envTheme := strings.TrimSpace(os.Getenv("TIMELINE_THEME")); envTheme != "" {
+		if _, ok := tui.SetTheme(envTheme); !ok {
+			_, _ = tui.SetTheme("dark")
+		}
+	} else {
+		_, _ = tui.SetTheme("dark")
+	}
+}
+
+func themeNamesList() string {
+	themes := tui.AvailableThemes()
+	names := make([]string, 0, len(themes))
+	for _, t := range themes {
+		names = append(names, t.Name)
+	}
+	return strings.Join(names, ", ")
 }
 
 func printUsage() {
 	fmt.Printf(`srl-timeline v%s — Interactive Configuration History & Rollback for Nokia SR Linux
 
 Usage:
-  timeline [--filter <path>]                     Launch interactive Bubble Tea TUI
-  timeline tui [--filter <path>]                 Launch interactive Bubble Tea TUI
-  timeline log [--limit <n>] [--filter <path>]   Show configuration commit history
-  timeline diff [<rev1> [<rev2>]] [--format unified|cli|path] [--filter <path>]
+  timeline [--filter <path>] [--theme <name>] [--color-profile <profile>]
+  timeline tui [--filter <path>] [--theme <name>] [--color-profile <profile>]
+  timeline log [--limit <n>] [--filter <path>] [--theme <name>]
+  timeline diff [<rev1> [<rev2>]] [--format unified|json|cli|path] [--filter <path>] [--theme <name>]
   timeline show [<rev>|running] [--format cli|json] [--filter <path>]
   timeline restore <commit-sha> [--path <subtree>] [--yes]
   timeline cherry-pick <commit-sha> --path <subtree> [--yes]
@@ -47,25 +70,53 @@ Usage:
   timeline blame [<rev>] [--filter <path|author>]
   timeline remote [show|key|set <url> [--branch <name>] [--auto-push]|push]
   timeline daemon [start|stop|status|bootstrap]
+  timeline themes
   timeline version
-`, Version)
+
+Global Options & Environment:
+  --theme <name>            Color theme (env: TIMELINE_THEME). Press [T] in TUI to cycle live.
+                            Built-in themes: %s
+  --color-profile <profile> Terminal color profile: truecolor, 256, ansi, ascii (env: TIMELINE_COLOR_PROFILE)
+`, Version, themeNamesList())
+}
+
+func printThemes() {
+	current := tui.CurrentTheme().Name
+	fmt.Println("Available srl-timeline themes:")
+	for _, t := range tui.AvailableThemes() {
+		marker := "  "
+		if t.Name == current {
+			marker = "* "
+		}
+		mode := "dark"
+		if !t.IsDark {
+			mode = "light"
+		}
+		fmt.Printf("%s%-18s %-20s (%s)\n", marker, t.Name, t.DisplayName, mode)
+	}
 }
 
 func main() {
-	if len(os.Args) >= 2 {
-		switch os.Args[1] {
+	configureEnvironmentAppearance()
+	args := applyGlobalOptions(os.Args[1:])
+
+	if len(args) >= 1 {
+		switch args[0] {
 		case "-v", "--version", "version":
 			fmt.Printf("srl-timeline version %s\n", Version)
 			return
 		case "-h", "--help", "help":
 			printUsage()
 			return
+		case "themes":
+			printThemes()
+			return
 		}
 	}
 
-	if len(os.Args) < 2 || strings.HasPrefix(os.Args[1], "-") {
+	if len(args) < 1 || strings.HasPrefix(args[0], "-") {
 		// Launch interactive Bubble Tea TUI
-		initialFilter := extractInitialFilter(os.Args[1:])
+		initialFilter := extractInitialFilter(args)
 		if err := tui.RunTUI(initialFilter); err != nil {
 			fmt.Fprintf(os.Stderr, "Error running timeline TUI: %v\n", err)
 			os.Exit(1)
@@ -73,7 +124,8 @@ func main() {
 		return
 	}
 
-	subcommand := os.Args[1]
+	subcommand := args[0]
+	subArgs := args[1:]
 	backend := gitbackend.NewGitBackend("")
 	client := srlclient.NewSRLClient()
 
@@ -92,8 +144,11 @@ func main() {
 	case "version":
 		fmt.Printf("srl-timeline version %s\n", Version)
 		return
+	case "themes":
+		printThemes()
+		return
 	case "tui":
-		initialFilter := extractInitialFilter(os.Args[2:])
+		initialFilter := extractInitialFilter(subArgs)
 		if err := tui.RunTUI(initialFilter); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -101,8 +156,8 @@ func main() {
 
 	case "daemon":
 		action := "status"
-		if len(os.Args) >= 3 {
-			action = os.Args[2]
+		if len(subArgs) >= 1 {
+			action = subArgs[0]
 		}
 		if err := daemon.ManageDaemonProcess(action); err != nil {
 			fmt.Fprintf(os.Stderr, "Daemon error: %v\n", err)
@@ -113,38 +168,40 @@ func main() {
 		logFlags := flag.NewFlagSet("log", flag.ExitOnError)
 		limit := logFlags.Int("limit", 20, "Maximum number of commits")
 		filterQuery := logFlags.String("filter", "", "Filter commits by path")
-		_ = logFlags.Parse(reorderFlags(os.Args[2:]))
+		_ = logFlags.Parse(reorderFlags(subArgs))
 
 		commits := backend.GetTimeline(*limit, *filterQuery)
 		header := fmt.Sprintf("%-10s %-12s %-15s %-12s %s", "REV", "AUTHOR", "WHEN", "CHANGES", "MESSAGE")
-		fmt.Println(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#8b949e")).Render(header))
-		fmt.Println(lipgloss.NewStyle().Foreground(lipgloss.Color("#30363d")).Render(strings.Repeat("─", 75)))
+		fmt.Println(lipgloss.NewStyle().Bold(true).Foreground(tui.ColorMuted).Render(header))
+		fmt.Println(lipgloss.NewStyle().Foreground(tui.ColorBorder).Render(strings.Repeat("─", 75)))
 		for _, c := range commits {
-			revStr := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#58a6ff")).Render(fmt.Sprintf("%-10s", c.CommitID))
-			authStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#bc8cff"))
+			revStr := lipgloss.NewStyle().Bold(true).Foreground(tui.ColorPrimary).Render(fmt.Sprintf("%-10s", c.CommitID))
+			authStyle := lipgloss.NewStyle().Foreground(tui.ColorPurple)
 			if c.Author == "admin" || c.Author == "root" {
-				authStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#3fb950"))
+				authStyle = lipgloss.NewStyle().Bold(true).Foreground(tui.ColorSuccess)
 			}
 			authStr := authStyle.Render(fmt.Sprintf("%-12s", c.Author))
-			whenStr := lipgloss.NewStyle().Foreground(lipgloss.Color("#7d8590")).Render(fmt.Sprintf("%-15s", c.RelativeTime()))
+			whenStr := lipgloss.NewStyle().Foreground(tui.ColorTextDim).Render(fmt.Sprintf("%-15s", c.RelativeTime()))
 
-			statStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7d8590"))
+			statStyle := lipgloss.NewStyle().Foreground(tui.ColorTextDim)
 			if strings.HasPrefix(c.DiffStat, "+") {
-				statStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#3fb950"))
+				statStyle = lipgloss.NewStyle().Bold(true).Foreground(tui.ColorSuccess)
 			} else if strings.HasPrefix(c.DiffStat, "~") {
-				statStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#d29922"))
+				statStyle = lipgloss.NewStyle().Foreground(tui.ColorWarning)
+			} else if strings.HasPrefix(c.DiffStat, "-") {
+				statStyle = lipgloss.NewStyle().Bold(true).Foreground(tui.ColorDanger)
 			}
 			statStr := statStyle.Render(fmt.Sprintf("%-12s", c.DiffStat))
-			msgStr := lipgloss.NewStyle().Foreground(lipgloss.Color("#e6edf3")).Render(c.Message)
+			msgStr := lipgloss.NewStyle().Foreground(tui.ColorText).Render(c.Message)
 
 			fmt.Printf("%s %s %s %s %s\n", revStr, authStr, whenStr, statStr, msgStr)
 		}
 
 	case "diff":
 		diffFlags := flag.NewFlagSet("diff", flag.ExitOnError)
-		diffFmt := diffFlags.String("format", "unified", "Diff format: unified, cli, path")
+		diffFmt := diffFlags.String("format", "unified", "Diff format: unified, json, cli, path")
 		filterQuery := diffFlags.String("filter", "", "Filter diff by path")
-		_ = diffFlags.Parse(reorderFlags(os.Args[2:]))
+		_ = diffFlags.Parse(reorderFlags(subArgs))
 
 		revs := diffFlags.Args()
 		rev1 := "HEAD~1"
@@ -160,13 +217,13 @@ func main() {
 		cfg2 := backend.GetConfigAtCommit(rev2)
 		res := differ.SemanticDiff(cfg1, cfg2, *filterQuery)
 
-		switch *diffFmt {
+		switch strings.ToLower(*diffFmt) {
 		case "cli":
 			for _, l := range res.CLIDiffLines {
 				if strings.HasPrefix(l, "+") {
-					fmt.Println(lipgloss.NewStyle().Foreground(lipgloss.Color("#3fb950")).Render(l))
+					fmt.Println(lipgloss.NewStyle().Foreground(tui.ColorSuccess).Render(l))
 				} else if strings.HasPrefix(l, "-") {
-					fmt.Println(lipgloss.NewStyle().Foreground(lipgloss.Color("#f85149")).Render(l))
+					fmt.Println(lipgloss.NewStyle().Foreground(tui.ColorDanger).Render(l))
 				} else {
 					fmt.Println(l)
 				}
@@ -176,24 +233,26 @@ func main() {
 				var badge string
 				switch c.DiffType {
 				case "ADDED":
-					badge = lipgloss.NewStyle().Background(lipgloss.Color("#238636")).Foreground(lipgloss.Color("#ffffff")).Bold(true).Render(" ADD ")
+					badge = lipgloss.NewStyle().Background(tui.ColorSuccessBg).Foreground(tui.ColorOnAccent).Bold(true).Render(" ADD ")
 				case "MODIFIED":
-					badge = lipgloss.NewStyle().Background(lipgloss.Color("#d29922")).Foreground(lipgloss.Color("#ffffff")).Bold(true).Render(" MOD ")
+					badge = lipgloss.NewStyle().Background(tui.ColorWarning).Foreground(tui.ColorOnAccent).Bold(true).Render(" MOD ")
 				case "DELETED":
-					badge = lipgloss.NewStyle().Background(lipgloss.Color("#da3633")).Foreground(lipgloss.Color("#ffffff")).Bold(true).Render(" DEL ")
+					badge = lipgloss.NewStyle().Background(tui.ColorDangerBg).Foreground(tui.ColorOnAccent).Bold(true).Render(" DEL ")
 				}
-				fmt.Printf("%s %s\n", badge, lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#e6edf3")).Render(c.Path))
+				fmt.Printf("%s %s\n", badge, lipgloss.NewStyle().Bold(true).Foreground(tui.ColorText).Render(c.Path))
 			}
+		case "unified", "json":
+			fallthrough
 		default:
 			for _, l := range res.UnifiedDiffLines {
 				if strings.HasPrefix(l, "+++") || strings.HasPrefix(l, "---") {
-					fmt.Println(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#8b949e")).Render(l))
+					fmt.Println(lipgloss.NewStyle().Bold(true).Foreground(tui.ColorMuted).Render(l))
 				} else if strings.HasPrefix(l, "@@") {
-					fmt.Println(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#58a6ff")).Render(l))
+					fmt.Println(lipgloss.NewStyle().Bold(true).Foreground(tui.ColorPrimary).Render(l))
 				} else if strings.HasPrefix(l, "+") {
-					fmt.Println(lipgloss.NewStyle().Foreground(lipgloss.Color("#3fb950")).Render(l))
+					fmt.Println(lipgloss.NewStyle().Foreground(tui.ColorSuccess).Render(l))
 				} else if strings.HasPrefix(l, "-") {
-					fmt.Println(lipgloss.NewStyle().Foreground(lipgloss.Color("#f85149")).Render(l))
+					fmt.Println(lipgloss.NewStyle().Foreground(tui.ColorDanger).Render(l))
 				} else {
 					fmt.Println(l)
 				}
@@ -204,7 +263,7 @@ func main() {
 		showFlags := flag.NewFlagSet("show", flag.ExitOnError)
 		showFmt := showFlags.String("format", "cli", "Output format: cli, json")
 		filterQuery := showFlags.String("filter", "", "Filter by path")
-		_ = showFlags.Parse(reorderFlags(os.Args[2:]))
+		_ = showFlags.Parse(reorderFlags(subArgs))
 
 		rev := "HEAD"
 		if len(showFlags.Args()) >= 1 {
@@ -222,7 +281,7 @@ func main() {
 			cfg = filter.FilterConfigSubtree(cfg, *filterQuery)
 		}
 
-		if *showFmt == "json" {
+		if strings.EqualFold(*showFmt, "json") {
 			out, _ := normalizer.CanonicalJSONString(cfg, 2)
 			fmt.Println(out)
 		} else {
@@ -234,7 +293,7 @@ func main() {
 		restoreFlags := flag.NewFlagSet(subcommand, flag.ExitOnError)
 		subtreePath := restoreFlags.String("path", "", "Subtree path for cherry-pick restoration (e.g. /interface[name=ethernet-1/1])")
 		yes := restoreFlags.Bool("yes", false, "Confirm restore without prompt")
-		_ = restoreFlags.Parse(reorderFlags(os.Args[2:], "yes"))
+		_ = restoreFlags.Parse(reorderFlags(subArgs, "yes"))
 
 		if len(restoreFlags.Args()) == 0 {
 			if subcommand == "cherry-pick" {
@@ -314,7 +373,7 @@ func main() {
 		exportFmt := exportFlags.String("format", "json", "Format: json, cli")
 		outPath := exportFlags.String("output", "", "Output file path")
 		saveStartup := exportFlags.Bool("save-startup", false, "Save directly to /etc/opt/srlinux/config.json")
-		_ = exportFlags.Parse(reorderFlags(os.Args[2:], "save-startup"))
+		_ = exportFlags.Parse(reorderFlags(subArgs, "save-startup"))
 
 		rev := "HEAD"
 		if len(exportFlags.Args()) >= 1 {
@@ -332,7 +391,7 @@ func main() {
 			return
 		}
 
-		if *exportFmt == "cli" {
+		if strings.EqualFold(*exportFmt, "cli") {
 			res, err := e.ExportAsFlatCLI(rev, *outPath)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Export failed: %v\n", err)
@@ -359,7 +418,7 @@ func main() {
 	case "blame":
 		blameFlags := flag.NewFlagSet("blame", flag.ExitOnError)
 		filterQuery := blameFlags.String("filter", "", "Filter blame by path or author")
-		_ = blameFlags.Parse(reorderFlags(os.Args[2:]))
+		_ = blameFlags.Parse(reorderFlags(subArgs))
 
 		rev := "HEAD"
 		if len(blameFlags.Args()) >= 1 {
@@ -373,11 +432,11 @@ func main() {
 		}
 
 	case "remote":
-		if len(os.Args) < 3 {
+		if len(subArgs) < 1 {
 			fmt.Println("Usage: timeline remote [show|key|set <url> [--branch <name>] [--auto-push]|push]")
 			return
 		}
-		action := os.Args[2]
+		action := subArgs[0]
 		switch action {
 		case "show":
 			cfg := backend.LoadRemoteConfig()
@@ -405,18 +464,18 @@ func main() {
 			fmt.Println(pubKey)
 
 		case "set":
-			if len(os.Args) < 4 {
+			if len(subArgs) < 2 {
 				fmt.Println("Usage: timeline remote set <url> [--branch <name>] [--auto-push]")
 				os.Exit(1)
 			}
-			url := os.Args[3]
+			url := subArgs[1]
 			branch := "main"
 			autoPush := false
-			for i := 4; i < len(os.Args); i++ {
-				if os.Args[i] == "--branch" && i+1 < len(os.Args) {
-					branch = os.Args[i+1]
+			for i := 2; i < len(subArgs); i++ {
+				if subArgs[i] == "--branch" && i+1 < len(subArgs) {
+					branch = subArgs[i+1]
 					i++
-				} else if os.Args[i] == "--auto-push" {
+				} else if subArgs[i] == "--auto-push" {
 					autoPush = true
 				}
 			}
@@ -473,6 +532,51 @@ func reorderFlags(args []string, boolFlagNames ...string) []string {
 		}
 	}
 	return append(flags, pos...)
+}
+
+func extractGlobalOptions(args []string) (remaining []string, themeName string, colorProfile string) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if (arg == "--theme" || arg == "-theme") && i+1 < len(args) {
+			themeName = args[i+1]
+			i++
+		} else if strings.HasPrefix(arg, "--theme=") {
+			themeName = strings.TrimPrefix(arg, "--theme=")
+		} else if strings.HasPrefix(arg, "-theme=") {
+			themeName = strings.TrimPrefix(arg, "-theme=")
+		} else if (arg == "--color-profile" || arg == "-color-profile") && i+1 < len(args) {
+			colorProfile = args[i+1]
+			i++
+		} else if strings.HasPrefix(arg, "--color-profile=") {
+			colorProfile = strings.TrimPrefix(arg, "--color-profile=")
+		} else if strings.HasPrefix(arg, "-color-profile=") {
+			colorProfile = strings.TrimPrefix(arg, "-color-profile=")
+		} else {
+			remaining = append(remaining, arg)
+		}
+	}
+	return remaining, themeName, colorProfile
+}
+
+func applyGlobalOptions(args []string) []string {
+	remaining, themeName, colorProfile := extractGlobalOptions(args)
+	if colorProfile != "" {
+		if err := tui.SetColorProfile(colorProfile); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+		}
+	}
+	if themeName != "" {
+		if strings.EqualFold(themeName, "list") {
+			printThemes()
+			os.Exit(0)
+		}
+		if _, ok := tui.SetTheme(themeName); !ok {
+			fmt.Fprintf(os.Stderr, "Warning: unknown theme %q (valid: %s); falling back to 'dark'\n",
+				themeName, themeNamesList())
+			_, _ = tui.SetTheme("dark")
+		}
+	}
+	return remaining
 }
 
 func extractInitialFilter(args []string) string {

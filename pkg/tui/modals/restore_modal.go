@@ -30,12 +30,12 @@ func NewRestoreModal(commit models.TimelineCommit, width, height int) RestoreMod
 func (m RestoreModalModel) View() string {
 	title := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("#ffffff")).
-		Background(lipgloss.Color("#da3633")).
+		Foreground(ColorOnAccent).
+		Background(ColorDangerBg).
 		Padding(0, 1).
 		Render("⚠️ CONFIRM FULL CONFIGURATION RESTORE")
 
-	warning := lipgloss.NewStyle().Foreground(lipgloss.Color("#f85149")).Render(
+	warning := lipgloss.NewStyle().Foreground(ColorDanger).Bold(true).Render(
 		"WARNING: This will replace the LIVE switch running configuration\n" +
 			"with the snapshot from the selected revision!",
 	)
@@ -45,29 +45,54 @@ func (m RestoreModalModel) View() string {
 		shortSHA = shortSHA[:8]
 	}
 
+	lblStyle := lipgloss.NewStyle().Foreground(ColorMuted).Bold(true)
+	valStyle := lipgloss.NewStyle().Foreground(ColorText)
+	shaStyle := lipgloss.NewStyle().Foreground(ColorActive).Bold(true)
+
 	details := fmt.Sprintf(
-		"Target Commit: %s\nAuthor:        %s\nDate:          %s\nSummary:       %s",
-		shortSHA,
-		m.Commit.Author,
-		m.Commit.FormattedTime(),
-		m.Commit.Message,
+		"%s %s\n%s %s\n%s %s\n%s %s",
+		lblStyle.Render("Target Commit:"), shaStyle.Render(shortSHA),
+		lblStyle.Render("Author:       "), valStyle.Render(m.Commit.Author),
+		lblStyle.Render("Date:         "), valStyle.Render(m.Commit.FormattedTime()),
+		lblStyle.Render("Summary:      "), valStyle.Render(m.Commit.Message),
 	)
 
-	prompt := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#58a6ff")).Render(
+	prompt := lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Render(
 		"\nPress [Y] or [Enter] to Confirm Restore  |  Press [N] or [Esc] to Cancel",
 	)
 
 	content := fmt.Sprintf("%s\n\n%s\n\n%s\n%s", title, warning, details, prompt)
+	innerW := 66
+	if m.Width > 0 && m.Width-6 < innerW {
+		innerW = m.Width - 6
+	}
+	if innerW < 10 {
+		innerW = 10
+	}
+	vPad := 1
+	if m.Height > 0 && m.Height < 20 {
+		vPad = 0
+	}
+	paintedContent := PaintSurface(content, innerW, 0, ColorSurface, ColorText)
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#da3633")).
-		Background(lipgloss.Color("#161b22")).
-		Padding(1, 2).
-		Width(70).
-		Render(content)
+		BorderForeground(ColorDangerBg).
+		BorderBackground(ColorSurface).
+		Background(ColorSurface).
+		Foreground(ColorText).
+		Padding(vPad, 2).
+		Render(paintedContent)
 
-	return lipgloss.Place(m.Width, m.Height, lipgloss.Center, lipgloss.Center, box)
+	return lipgloss.Place(
+		m.Width,
+		m.Height,
+		lipgloss.Center,
+		lipgloss.Center,
+		box,
+		lipgloss.WithWhitespaceBackground(ColorBackground),
+		lipgloss.WithWhitespaceForeground(ColorTextDim),
+	)
 }
 
 // Update processes key events.

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1060,3 +1061,314 @@ func TestReviewerModalInputsAndFilterRecovery(t *testing.T) {
 		t.Fatalf("expected isRestoring=false after NotificationMsg completion")
 	}
 }
+
+func TestFullBleedSurfaceAndMultiThemeInvariants(t *testing.T) {
+	_ = SetColorProfile("truecolor")
+	_, _ = SetTheme("dark")
+	defer func() {
+		_, _ = SetTheme("dark")
+	}()
+
+	backend := gitbackend.NewGitBackend(filepath.Join(t.TempDir(), "repo"))
+	cfg1 := map[string]interface{}{
+		"system": map[string]interface{}{
+			"name": map[string]interface{}{"host-name": "srl-theme-test"},
+		},
+		"interface": []interface{}{
+			map[string]interface{}{"name": "ethernet-1/1", "description": "Old Port"},
+		},
+	}
+	cfg2 := map[string]interface{}{
+		"system": map[string]interface{}{
+			"name": map[string]interface{}{"host-name": "srl-theme-test"},
+		},
+		"interface": []interface{}{
+			map[string]interface{}{"name": "ethernet-1/1", "description": "New Port"},
+		},
+	}
+	if _, _, err := backend.RecordConfigChange(cfg1, "admin", "1", "", time.Now().UTC().Add(-time.Minute), "Initial commit", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := backend.RecordConfigChange(cfg2, "netops", "2", "", time.Now().UTC(), "Update interface description", nil); err != nil {
+		t.Fatal(err)
+	}
+	model := NewAppModel(backend, nil, "")
+
+	resModel, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 35})
+	app := resModel.(AppModel)
+
+	// Verify live 'T' key cycles themes and updates notification banner
+	initialTheme := CurrentTheme().Name
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})
+	app = resModel.(AppModel)
+	nextTheme := CurrentTheme().Name
+	if nextTheme == initialTheme {
+		t.Fatalf("expected 'T' key to advance theme from %q, still %q", initialTheme, nextTheme)
+	}
+	if !strings.Contains(app.Notification, nextTheme) {
+		t.Fatalf("expected notification banner to mention new theme %q, got %q", nextTheme, app.Notification)
+	}
+
+	// Verify multiline notifications are clamped to 1 line and preserve exact screen height
+	resModel, _ = app.Update(NotificationMsg{
+		Message:  "Multiline error:\nline two of error\r\nline three of error",
+		Severity: "error",
+	})
+	app = resModel.(AppModel)
+	assertNoUnrecoveredReset(t, "multiline-notification-120x35", app.View(), 120, 35)
+
+	// Clear notification
+	app.setNotification("", app.NotifyStyle)
+
+	sizes := []struct{ w, h int }{
+		{80, 24},
+		{120, 35},
+	}
+
+	for _, theme := range AvailableThemes() {
+		_, ok := SetTheme(theme.Name)
+		if !ok {
+			t.Fatalf("SetTheme(%q) failed", theme.Name)
+		}
+		app.RefreshTheme()
+
+		for _, sz := range sizes {
+			resModel, _ = app.Update(tea.WindowSizeMsg{Width: sz.w, Height: sz.h})
+			app = resModel.(AppModel)
+
+			// 1. DiffView: unified, path, cli, vsLive
+			app.ActiveModal = ModalNone
+			app.ActiveTab = TabDiff
+			for _, mode := range []string{"unified", "path", "cli"} {
+				app.DiffView.DiffMode = mode
+				app.DiffView.UpdateContent()
+				assertNoUnrecoveredReset(t, fmt.Sprintf("theme=%s/%dx%d/diff-%s", theme.Name, sz.w, sz.h, mode), app.View(), sz.w, sz.h)
+			}
+
+			// 2. ConfigView: cli, json
+			app.ActiveTab = TabConfig
+			app.updateActiveTabContent()
+			for _, fmtMode := range []string{"cli", "json"} {
+				app.ConfigView.FormatMode = fmtMode
+				app.ConfigView.UpdateContent()
+				assertNoUnrecoveredReset(t, fmt.Sprintf("theme=%s/%dx%d/config-%s", theme.Name, sz.w, sz.h, fmtMode), app.View(), sz.w, sz.h)
+			}
+
+			// 3. BlameView
+			app.ActiveTab = TabBlame
+			app.updateActiveTabContent()
+			assertNoUnrecoveredReset(t, fmt.Sprintf("theme=%s/%dx%d/blame", theme.Name, sz.w, sz.h), app.View(), sz.w, sz.h)
+
+			// 4. All 5 Modals
+			selected := app.TimelineView.SelectedCommit()
+			if selected == nil {
+				t.Fatalf("expected non-nil selected commit")
+			}
+
+			app.RestoreModal = modals.NewRestoreModal(*selected, sz.w, sz.h)
+			app.ActiveModal = ModalRestore
+			assertNoUnrecoveredReset(t, fmt.Sprintf("theme=%s/%dx%d/modal-restore", theme.Name, sz.w, sz.h), app.View(), sz.w, sz.h)
+
+			app.CherryPickModal = modals.NewCherryPickModal(*selected, app.DiffView.DiffResult.Changes, map[string]interface{}{
+				"interface": []interface{}{
+					map[string]interface{}{"name": "ethernet-1/1", "description": "test"},
+				},
+			}, sz.w, sz.h)
+			app.ActiveModal = ModalCherryPick
+			assertNoUnrecoveredReset(t, fmt.Sprintf("theme=%s/%dx%d/modal-cherrypick", theme.Name, sz.w, sz.h), app.View(), sz.w, sz.h)
+
+			app.ExportModal = modals.NewExportModal(*selected, sz.w, sz.h)
+			app.ActiveModal = ModalExport
+			assertNoUnrecoveredReset(t, fmt.Sprintf("theme=%s/%dx%d/modal-export", theme.Name, sz.w, sz.h), app.View(), sz.w, sz.h)
+
+			app.RemoteModal = modals.NewRemoteModal(models.RemoteRepoConfig{
+				URL:        "git@github.com:example/srl-configs.git",
+				Branch:     "main",
+				AutoPush:   true,
+				SyncStatus: "Up to date",
+				PublicKey:  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey admin@srl",
+			}, sz.w, sz.h)
+			app.ActiveModal = ModalRemote
+			assertNoUnrecoveredReset(t, fmt.Sprintf("theme=%s/%dx%d/modal-remote", theme.Name, sz.w, sz.h), app.View(), sz.w, sz.h)
+
+			app.HelpModal = modals.NewHelpModal(sz.w, sz.h)
+			app.ActiveModal = ModalHelp
+			assertNoUnrecoveredReset(t, fmt.Sprintf("theme=%s/%dx%d/modal-help", theme.Name, sz.w, sz.h), app.View(), sz.w, sz.h)
+
+			// At 80x24, verify HelpModal and CherryPickModal (with many nodes) do not vertically clip their bottom border ╰
+			if sz.w == 80 && sz.h == 24 {
+				helpView := app.View()
+				if !strings.Contains(helpView, "╰") || !strings.Contains(helpView, "Press [Esc], [Enter], or [?] to close") {
+					t.Fatalf("theme=%s/80x24/modal-help clipped bottom border or footer:\n%s", theme.Name, helpView)
+				}
+
+				manyChanges := []models.PathChange{
+					{Path: "/interface[name=ethernet-1/1]/description", DiffType: models.DiffModified, NewValue: "P1"},
+					{Path: "/interface[name=ethernet-1/2]/description", DiffType: models.DiffModified, NewValue: "P2"},
+					{Path: "/interface[name=ethernet-1/3]/description", DiffType: models.DiffModified, NewValue: "P3"},
+					{Path: "/interface[name=ethernet-1/4]/description", DiffType: models.DiffModified, NewValue: "P4"},
+					{Path: "/interface[name=ethernet-1/5]/description", DiffType: models.DiffModified, NewValue: "P5"},
+					{Path: "/system/name/host-name", DiffType: models.DiffModified, NewValue: "srl-test"},
+					{Path: "/network-instance[name=default]/protocols/bgp/admin-state", DiffType: models.DiffAdded, NewValue: "enable"},
+				}
+				cm := modals.NewCherryPickModal(*selected, manyChanges, nil, 80, 24)
+				cm, _, _ = cm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}}) // expand all
+				app.CherryPickModal = cm
+				app.ActiveModal = ModalCherryPick
+				cpView := app.View()
+				assertNoUnrecoveredReset(t, fmt.Sprintf("theme=%s/80x24/modal-cherrypick-expanded", theme.Name), cpView, 80, 24)
+				if !strings.Contains(cpView, "╰") {
+					t.Fatalf("theme=%s/80x24/modal-cherrypick-expanded clipped bottom border ╰:\n%s", theme.Name, cpView)
+				}
+			}
+
+			app.ActiveModal = ModalNone
+		}
+	}
+
+	// Verify extreme narrow/short terminal (40x12) does not overflow split widths or corrupt ANSI resets
+	tlW, dtW := computeSplitOuterWidths(40)
+	if tlW+1+dtW != 40 {
+		t.Fatalf("computeSplitOuterWidths(40) = (%d, %d), expected tlW+1+dtW == 40", tlW, dtW)
+	}
+	resModel, _ = app.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	app = resModel.(AppModel)
+	for _, tab := range []ActiveTab{TabDiff, TabConfig, TabBlame} {
+		app.ActiveModal = ModalNone
+		app.ActiveTab = tab
+		app.updateActiveTabContent()
+		assertNoUnrecoveredReset(t, fmt.Sprintf("narrow-40x12/tab-%d", tab), app.View(), 40, 12)
+	}
+	selected := app.TimelineView.SelectedCommit()
+	app.HelpModal = modals.NewHelpModal(40, 12)
+	app.ActiveModal = ModalHelp
+	assertNoUnrecoveredReset(t, "narrow-40x12/modal-help", app.View(), 40, 12)
+
+	// Verify live 'T' theme cycling works inside ModalHelp, ModalRestore, ModalCherryPick (!UseCustom),
+	// ModalExport (Format=="startup"), and ModalRemote (FocusedIndex!=0), and does NOT intercept 'T' when textinput is focused.
+	_, _ = SetTheme("dracula")
+	app.RefreshTheme()
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})
+	app = resModel.(AppModel)
+	if CurrentTheme().Name == "dracula" {
+		t.Fatalf("expected 'T' inside ModalHelp to cycle theme away from dracula")
+	}
+	cycledTheme := CurrentTheme().Name
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	app = resModel.(AppModel)
+	if app.ActiveModal != ModalNone || CurrentTheme().Name != cycledTheme {
+		t.Fatalf("expected ModalNone and theme %q preserved after Esc, got modal=%v theme=%q", cycledTheme, app.ActiveModal, CurrentTheme().Name)
+	}
+
+	// ModalRestore: 'T' cycles theme without confirming or closing modal
+	app.RestoreModal = modals.NewRestoreModal(*selected, 80, 24)
+	app.ActiveModal = ModalRestore
+	beforeRestTheme := CurrentTheme().Name
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})
+	app = resModel.(AppModel)
+	if app.ActiveModal != ModalRestore || CurrentTheme().Name == beforeRestTheme {
+		t.Fatalf("expected 'T' inside ModalRestore to cycle theme without closing modal, got modal=%v theme=%q",
+			app.ActiveModal, CurrentTheme().Name)
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	app = resModel.(AppModel)
+
+	// ModalCherryPick: when !UseCustom, 'T' cycles theme; when UseCustom, 'T' types into CustomInput
+	app.CherryPickModal = modals.NewCherryPickModal(*selected, app.DiffView.DiffResult.Changes, nil, 80, 24)
+	app.ActiveModal = ModalCherryPick
+	beforeCPTheme := CurrentTheme().Name
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})
+	app = resModel.(AppModel)
+	if CurrentTheme().Name == beforeCPTheme {
+		t.Fatalf("expected 'T' in ModalCherryPick (!UseCustom) to cycle theme")
+	}
+	app.CherryPickModal.UseCustom = true
+	app.CherryPickModal.CustomInput.Focus()
+	beforeCPCustomTheme := CurrentTheme().Name
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})
+	app = resModel.(AppModel)
+	if CurrentTheme().Name != beforeCPCustomTheme || app.CherryPickModal.CustomInput.Value() != "T" {
+		t.Fatalf("expected 'T' in ModalCherryPick (UseCustom) to type into CustomInput without changing theme, got val=%q theme=%q",
+			app.CherryPickModal.CustomInput.Value(), CurrentTheme().Name)
+	}
+
+	// ModalExport: when Format == "json" (PathInput focused), 'T' types into PathInput; when Format == "startup", 'T' cycles theme
+	app.ExportModal = modals.NewExportModal(*selected, 80, 24)
+	app.ActiveModal = ModalExport
+	beforeExpTheme := CurrentTheme().Name
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})
+	app = resModel.(AppModel)
+	if CurrentTheme().Name != beforeExpTheme || app.ExportModal.PathInput.Value() != "T" {
+		t.Fatalf("expected 'T' in ModalExport (Format=json) to type into PathInput, got val=%q", app.ExportModal.PathInput.Value())
+	}
+	app.ExportModal.Format = "startup"
+	app.ExportModal.PathInput.Blur()
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})
+	app = resModel.(AppModel)
+	if CurrentTheme().Name == beforeExpTheme {
+		t.Fatalf("expected 'T' in ModalExport (Format=startup) to cycle theme")
+	}
+
+	// ModalRemote: when FocusedIndex == 0 (URLInput focused), 'T' types into URLInput; when FocusedIndex != 0, 'T' cycles theme
+	app.RemoteModal = modals.NewRemoteModal(models.RemoteRepoConfig{}, 80, 24)
+	app.ActiveModal = ModalRemote
+	beforeRemTheme := CurrentTheme().Name
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})
+	app = resModel.(AppModel)
+	if CurrentTheme().Name != beforeRemTheme || app.RemoteModal.URLInput.Value() != "T" {
+		t.Fatalf("expected 'T' in ModalRemote (FocusedIndex=0) to type into URLInput, got val=%q", app.RemoteModal.URLInput.Value())
+	}
+	app.RemoteModal.FocusedIndex = 1
+	app.RemoteModal.URLInput.Blur()
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})
+	app = resModel.(AppModel)
+	if CurrentTheme().Name == beforeRemTheme {
+		t.Fatalf("expected 'T' in ModalRemote (FocusedIndex=1) to cycle theme")
+	}
+	app.ActiveModal = ModalNone
+
+	// Verify RefreshTheme clears ConfigView.lastRendered and BlameView.lastRendered across ascii <-> truecolor profiles
+	app.ActiveTab = TabConfig
+	app.updateActiveTabContent()
+	if app.ConfigView.lastRendered == "" {
+		t.Fatalf("expected non-empty ConfigView.lastRendered after updateActiveTabContent")
+	}
+	app.ActiveTab = TabBlame
+	app.updateActiveTabContent()
+	if app.BlameView.lastRendered == "" {
+		t.Fatalf("expected non-empty BlameView.lastRendered after updateActiveTabContent")
+	}
+	_ = SetColorProfile("ascii")
+	app.RefreshTheme()
+	if strings.Contains(app.ConfigView.Viewport.View(), "\x1b[") || strings.Contains(app.BlameView.Viewport.View(), "\x1b[") {
+		t.Fatalf("expected no ANSI SGR sequences in ConfigView/BlameView after switching to ascii profile and calling RefreshTheme()")
+	}
+	_ = SetColorProfile("truecolor")
+	app.RefreshTheme()
+	if !strings.Contains(app.ConfigView.Viewport.View(), "\x1b[") || !strings.Contains(app.BlameView.Viewport.View(), "\x1b[") {
+		t.Fatalf("expected ANSI SGR sequences restored in ConfigView/BlameView after switching back to truecolor and calling RefreshTheme()")
+	}
+
+	// Verify success/error NotificationMsg uses high-contrast ColorSuccessBg / ColorDangerBg and updates on RefreshTheme()
+	_, _ = SetTheme("dracula")
+	app.RefreshTheme()
+	resModel, _ = app.Update(NotificationMsg{Message: "Saved", Severity: "success"})
+	app = resModel.(AppModel)
+	if app.NotifyStyle.GetBackground() != ColorSuccessBg {
+		t.Fatalf("expected success notification background %v (ColorSuccessBg), got %v", ColorSuccessBg, app.NotifyStyle.GetBackground())
+	}
+	_, _ = SetTheme("nord")
+	app.RefreshTheme()
+	if app.NotifyStyle.GetBackground() != ColorSuccessBg {
+		t.Fatalf("expected success notification background to update to nord ColorSuccessBg (%v) after RefreshTheme(), got %v",
+			ColorSuccessBg, app.NotifyStyle.GetBackground())
+	}
+	resModel, _ = app.Update(NotificationMsg{Message: "Failed", Severity: "error"})
+	app = resModel.(AppModel)
+	if app.NotifyStyle.GetBackground() != ColorDangerBg {
+		t.Fatalf("expected error notification background %v (ColorDangerBg), got %v", ColorDangerBg, app.NotifyStyle.GetBackground())
+	}
+}
+
+
+

@@ -25,6 +25,7 @@ func NewExportModal(commit models.TimelineCommit, width, height int) ExportModal
 	ti.Placeholder = "/tmp/exported_config.json"
 	ti.Prompt = "Output File: "
 	ti.Width = 45
+	StyleTextInput(&ti, ColorSurface, ColorText, ColorTextDim, ColorActive)
 	ti.Focus()
 
 	return ExportModalModel{
@@ -38,10 +39,12 @@ func NewExportModal(commit models.TimelineCommit, width, height int) ExportModal
 
 // View renders the export modal dialog.
 func (m ExportModalModel) View() string {
+	StyleTextInput(&m.PathInput, ColorSurface, ColorText, ColorTextDim, ColorActive)
+
 	title := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("#ffffff")).
-		Background(lipgloss.Color("#1f6feb")).
+		Foreground(ColorOnAccent).
+		Background(ColorPrimary).
 		Padding(0, 1).
 		Render("💾 EXPORT CONFIGURATION")
 
@@ -50,43 +53,65 @@ func (m ExportModalModel) View() string {
 		shortSHA = shortSHA[:8]
 	}
 
-	details := fmt.Sprintf("Exporting revision: %s (%s)", shortSHA, m.Commit.Message)
+	textStyle := lipgloss.NewStyle().Foreground(ColorText)
+	details := textStyle.Render(fmt.Sprintf("Exporting revision: %s (%s)", shortSHA, m.Commit.Message))
 
-	optJSON := "[1] JSON Startup Format (config.json)"
+	optJSON := textStyle.Render("  [1] JSON Startup Format (config.json)")
 	if m.Format == "json" {
-		optJSON = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#58a6ff")).Render("▶ [1] JSON Startup Format (config.json)")
+		optJSON = lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Render("▶ [1] JSON Startup Format (config.json)")
 	}
 
-	optCLI := "[2] Flat CLI Script (set / ...)"
+	optCLI := textStyle.Render("  [2] Flat CLI Script (set / ...)")
 	if m.Format == "cli" {
-		optCLI = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#58a6ff")).Render("▶ [2] Flat CLI Script (set / ...)")
+		optCLI = lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Render("▶ [2] Flat CLI Script (set / ...)")
 	}
 
-	optStartup := "[3] Save directly to switch /etc/opt/srlinux/config.json"
+	optStartup := textStyle.Render("  [3] Save directly to switch /etc/opt/srlinux/config.json")
 	if m.Format == "startup" {
-		optStartup = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#3fb950")).Render("▶ [3] Save directly to switch /etc/opt/srlinux/config.json")
+		optStartup = lipgloss.NewStyle().Bold(true).Foreground(ColorSuccess).Render("▶ [3] Save directly to switch /etc/opt/srlinux/config.json")
 	}
 
 	pathView := m.PathInput.View()
 	if m.Format == "startup" {
-		pathView = lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")).Render("Target: /etc/opt/srlinux/config.json (automatic)")
+		pathView = lipgloss.NewStyle().Foreground(ColorMuted).Render("Target: /etc/opt/srlinux/config.json (automatic)")
 	}
 
-	footer := lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")).Render(
+	footer := lipgloss.NewStyle().Foreground(ColorMuted).Render(
 		"\n[1/2/3 or ↑/↓/Tab] Select Format  |  [Enter] Export  |  [Esc] Cancel",
 	)
 
 	content := fmt.Sprintf("%s\n\n%s\n\n%s\n%s\n%s\n\n%s\n%s", title, details, optJSON, optCLI, optStartup, pathView, footer)
+	innerW := 66
+	if m.Width > 0 && m.Width-6 < innerW {
+		innerW = m.Width - 6
+	}
+	if innerW < 10 {
+		innerW = 10
+	}
+	vPad := 1
+	if m.Height > 0 && m.Height < 20 {
+		vPad = 0
+	}
+	paintedContent := PaintSurface(content, innerW, 0, ColorSurface, ColorText)
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#1f6feb")).
-		Background(lipgloss.Color("#161b22")).
-		Padding(1, 2).
-		Width(70).
-		Render(content)
+		BorderForeground(ColorPrimary).
+		BorderBackground(ColorSurface).
+		Background(ColorSurface).
+		Foreground(ColorText).
+		Padding(vPad, 2).
+		Render(paintedContent)
 
-	return lipgloss.Place(m.Width, m.Height, lipgloss.Center, lipgloss.Center, box)
+	return lipgloss.Place(
+		m.Width,
+		m.Height,
+		lipgloss.Center,
+		lipgloss.Center,
+		box,
+		lipgloss.WithWhitespaceBackground(ColorBackground),
+		lipgloss.WithWhitespaceForeground(ColorTextDim),
+	)
 }
 
 // Update processes export key events.

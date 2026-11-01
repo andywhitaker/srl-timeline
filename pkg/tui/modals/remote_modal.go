@@ -31,7 +31,8 @@ func NewRemoteModal(cfg models.RemoteRepoConfig, width, height int) RemoteModalM
 	ti.Placeholder = "git@github.com:org/srl-configs.git"
 	ti.Prompt = "Remote URL: "
 	ti.SetValue(cfg.URL)
-	ti.Width = 52
+	ti.Width = 50
+	StyleTextInput(&ti, ColorSurface, ColorText, ColorTextDim, ColorActive)
 	ti.Focus()
 
 	return RemoteModalModel{
@@ -64,23 +65,40 @@ func CopyToClipboard(text string) {
 
 // View renders the remote Git dialog.
 func (m RemoteModalModel) View() string {
+	StyleTextInput(&m.URLInput, ColorSurface, ColorText, ColorTextDim, ColorActive)
+	innerW := 68
+	if m.Width > 0 && m.Width-6 < innerW {
+		innerW = m.Width - 6
+	}
+	if innerW < 10 {
+		innerW = 10
+	}
+
 	title := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("#ffffff")).
-		Background(lipgloss.Color("#bc8cff")).
+		Foreground(ColorOnAccent).
+		Background(ColorPurple).
 		Padding(0, 1).
 		Render("🌐 REMOTE GIT REPOSITORY SETTINGS")
 
 	// 1. URL Input Box
+	urlBorderFg := ColorBorder
+	if m.FocusedIndex == 0 {
+		urlBorderFg = ColorActive
+	}
 	urlBoxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#30363d")).
-		Padding(0, 1).
-		Width(66)
-	if m.FocusedIndex == 0 {
-		urlBoxStyle = urlBoxStyle.BorderForeground(lipgloss.Color("#58a6ff"))
+		BorderForeground(urlBorderFg).
+		BorderBackground(ColorSurface).
+		Background(ColorSurface).
+		Foreground(ColorText).
+		Padding(0, 1)
+	urlInnerW := innerW - 4
+	if urlInnerW < 4 {
+		urlInnerW = 4
 	}
-	urlView := urlBoxStyle.Render(m.URLInput.View())
+	urlInner := PaintBarLine(m.URLInput.View(), urlInnerW, ColorSurface, ColorText)
+	urlView := urlBoxStyle.Render(urlInner)
 
 	// 2. Auto-push Checkbox
 	checkMark := "[ ]"
@@ -88,41 +106,41 @@ func (m RemoteModalModel) View() string {
 		checkMark = "[✓]"
 	}
 	autoPushLabel := fmt.Sprintf("%s Auto-push on every configuration commit", checkMark)
-	autoPushStyle := lipgloss.NewStyle().Padding(0, 1)
+	autoPushStyle := lipgloss.NewStyle().Padding(0, 1).Background(ColorSurface)
 	if m.FocusedIndex == 1 {
 		autoPushStyle = autoPushStyle.
-			Background(lipgloss.Color("#1f6feb")).
-			Foreground(lipgloss.Color("#ffffff")).
+			Background(ColorPrimary).
+			Foreground(ColorOnAccent).
 			Bold(true)
 	} else if m.AutoPush {
-		autoPushStyle = autoPushStyle.Foreground(lipgloss.Color("#3fb950")).Bold(true)
+		autoPushStyle = autoPushStyle.Foreground(ColorSuccess).Bold(true)
 	} else {
-		autoPushStyle = autoPushStyle.Foreground(lipgloss.Color("#8b949e"))
+		autoPushStyle = autoPushStyle.Foreground(ColorMuted)
 	}
 	autoPushView := autoPushStyle.Render(autoPushLabel)
 
 	// 3. Action Buttons
-	btnCopyStyle := lipgloss.NewStyle().Padding(0, 2).MarginRight(1).Background(lipgloss.Color("#21262d")).Foreground(lipgloss.Color("#e6edf3"))
+	btnCopyStyle := lipgloss.NewStyle().Padding(0, 2).MarginRight(1).MarginBackground(ColorSurface).Background(ColorBadgeBg).Foreground(ColorText)
 	if m.FocusedIndex == 2 {
-		btnCopyStyle = btnCopyStyle.Background(lipgloss.Color("#e3b341")).Foreground(lipgloss.Color("#000000")).Bold(true)
+		btnCopyStyle = btnCopyStyle.Background(ColorWarning).Foreground(ColorOnAccent).Bold(true)
 	}
 	btnCopy := btnCopyStyle.Render("📋 Copy Key")
 
-	btnPushStyle := lipgloss.NewStyle().Padding(0, 2).MarginRight(1).Background(lipgloss.Color("#21262d")).Foreground(lipgloss.Color("#e6edf3"))
+	btnPushStyle := lipgloss.NewStyle().Padding(0, 2).MarginRight(1).MarginBackground(ColorSurface).Background(ColorBadgeBg).Foreground(ColorText)
 	if m.FocusedIndex == 3 {
-		btnPushStyle = btnPushStyle.Background(lipgloss.Color("#1f6feb")).Foreground(lipgloss.Color("#ffffff")).Bold(true)
+		btnPushStyle = btnPushStyle.Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true)
 	}
 	btnPush := btnPushStyle.Render("🚀 Push Now")
 
-	btnSaveStyle := lipgloss.NewStyle().Padding(0, 2).MarginRight(1).Background(lipgloss.Color("#21262d")).Foreground(lipgloss.Color("#e6edf3"))
+	btnSaveStyle := lipgloss.NewStyle().Padding(0, 2).MarginRight(1).MarginBackground(ColorSurface).Background(ColorBadgeBg).Foreground(ColorText)
 	if m.FocusedIndex == 4 {
-		btnSaveStyle = btnSaveStyle.Background(lipgloss.Color("#238636")).Foreground(lipgloss.Color("#ffffff")).Bold(true)
+		btnSaveStyle = btnSaveStyle.Background(ColorSuccessBg).Foreground(ColorOnAccent).Bold(true)
 	}
 	btnSave := btnSaveStyle.Render("💾 Save & Close")
 
-	btnCancelStyle := lipgloss.NewStyle().Padding(0, 2).Background(lipgloss.Color("#21262d")).Foreground(lipgloss.Color("#8b949e"))
+	btnCancelStyle := lipgloss.NewStyle().Padding(0, 2).Background(ColorBadgeBg).Foreground(ColorMuted)
 	if m.FocusedIndex == 5 {
-		btnCancelStyle = btnCancelStyle.Background(lipgloss.Color("#da3633")).Foreground(lipgloss.Color("#ffffff")).Bold(true)
+		btnCancelStyle = btnCancelStyle.Background(ColorDangerBg).Foreground(ColorOnAccent).Bold(true)
 	}
 	btnCancel := btnCancelStyle.Render("❌ Cancel")
 
@@ -131,52 +149,80 @@ func (m RemoteModalModel) View() string {
 	// 4. Public Key Display (for easy copying to GitHub Deploy Keys)
 	var pubKeySection string
 	if m.Config.PublicKey != "" {
-		keyHeader := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#e3b341")).Render("🔑 Device Public SSH Key (Add to GitHub Deploy Keys):")
-		keyBox := lipgloss.NewStyle().
-			Background(lipgloss.Color("#0d1117")).
-			Foreground(lipgloss.Color("#58a6ff")).
-			Padding(0, 1).
-			Width(66).
-			Render(m.Config.PublicKey)
-		keyHint := lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")).Render("💡 Use [Copy Key] or cat /tmp/srl_timeline_deploy_key.pub")
+		keyHeader := lipgloss.NewStyle().Bold(true).Foreground(ColorWarning).Render("🔑 Device Public SSH Key (Add to GitHub Deploy Keys):")
+		keyBox := PaintLine(
+			lipgloss.NewStyle().Foreground(ColorActive).Render(" "+m.Config.PublicKey),
+			innerW,
+			ColorBackground,
+			ColorActive,
+		)
+		keyHint := lipgloss.NewStyle().Foreground(ColorMuted).Render("💡 Use [Copy Key] or cat /tmp/srl_timeline_deploy_key.pub")
 		pubKeySection = fmt.Sprintf("\n%s\n%s\n%s", keyHeader, keyBox, keyHint)
 	}
 
 	// 5. Status / Error Message
 	var statusView string
 	if m.StatusMsg != "" {
-		statusStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#3fb950"))
+		statusStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorSuccess)
 		if m.IsError {
-			statusStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#f85149"))
+			statusStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorDanger)
 		}
 		statusView = statusStyle.Render(fmt.Sprintf("Status: %s", m.StatusMsg))
 	} else if m.Config.SyncStatus != "" {
-		statusView = lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")).Render(fmt.Sprintf("Sync Status: %s", m.Config.SyncStatus))
+		statusView = lipgloss.NewStyle().Foreground(ColorMuted).Render(fmt.Sprintf("Sync Status: %s", m.Config.SyncStatus))
 	}
 
-	footer := lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")).Render(
+	footerRaw := lipgloss.NewStyle().Foreground(ColorMuted).Render(
 		"[Tab/↓/↑] Navigate fields  |  [Space/Enter] Toggle / Activate  |  [c] Copy Key  |  [Esc] Close",
 	)
+	footer := PaintLine(footerRaw, innerW, ColorSurface, ColorMuted)
 
-	content := fmt.Sprintf("%s\n\n%s\n%s\n\n%s\n\n%s%s\n\n%s",
-		title,
-		urlView,
-		autoPushView,
-		buttonsRow,
-		statusView,
-		pubKeySection,
-		footer,
-	)
+	compact := m.Height > 0 && m.Height <= 24
+	vPad := 1
+	var content string
+	if compact {
+		vPad = 0
+		content = fmt.Sprintf("%s\n%s\n%s\n%s\n%s%s\n%s",
+			title,
+			urlView,
+			autoPushView,
+			buttonsRow,
+			statusView,
+			pubKeySection,
+			footer,
+		)
+	} else {
+		content = fmt.Sprintf("%s\n\n%s\n%s\n\n%s\n\n%s%s\n\n%s",
+			title,
+			urlView,
+			autoPushView,
+			buttonsRow,
+			statusView,
+			pubKeySection,
+			footer,
+		)
+	}
+
+	paintedContent := PaintSurface(content, innerW, 0, ColorSurface, ColorText)
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#bc8cff")).
-		Background(lipgloss.Color("#161b22")).
-		Padding(1, 2).
-		Width(72).
-		Render(content)
+		BorderForeground(ColorPurple).
+		BorderBackground(ColorSurface).
+		Background(ColorSurface).
+		Foreground(ColorText).
+		Padding(vPad, 2).
+		Render(paintedContent)
 
-	return lipgloss.Place(m.Width, m.Height, lipgloss.Center, lipgloss.Center, box)
+	return lipgloss.Place(
+		m.Width,
+		m.Height,
+		lipgloss.Center,
+		lipgloss.Center,
+		box,
+		lipgloss.WithWhitespaceBackground(ColorBackground),
+		lipgloss.WithWhitespaceForeground(ColorTextDim),
+	)
 }
 
 // Update processes remote settings events.

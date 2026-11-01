@@ -23,10 +23,6 @@ func NewFilterBarModel(width int) FilterBarModel {
 	ti := textinput.New()
 	ti.Placeholder = "path (e.g. interface, bgp)"
 	ti.Prompt = " 🔍 FILTER: "
-	ti.PromptStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#58a6ff"))
-	ti.TextStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff"))
-	ti.PlaceholderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7d8590"))
-	ti.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#58a6ff"))
 
 	inputW := width - 36
 	if inputW < 12 {
@@ -34,12 +30,36 @@ func NewFilterBarModel(width int) FilterBarModel {
 	}
 	ti.Width = inputW
 
-	return FilterBarModel{
+	m := FilterBarModel{
 		TextInput:  ti,
 		MatchCount: 0,
 		TotalCount: 0,
 		Width:      width,
 		IsFocused:  false,
+	}
+	m.RefreshStyles()
+	return m
+}
+
+// RefreshStyles updates the text input styles to match the active theme and focus state.
+func (m *FilterBarModel) RefreshStyles() {
+	bgColor := ColorSurface
+	if m.IsFocused {
+		bgColor = ColorSurfaceFocus
+	}
+	StyleTextInput(&m.TextInput, bgColor, ColorText, ColorTextDim, ColorActive)
+	m.TextInput.TextStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorText).Background(bgColor)
+	if m.IsFocused {
+		m.TextInput.PromptStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(ColorOnAccent).
+			Background(ColorPrimary).
+			Padding(0, 1)
+	} else {
+		m.TextInput.PromptStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(ColorActive).
+			Background(bgColor)
 	}
 }
 
@@ -57,20 +77,14 @@ func (m FilterBarModel) Value() string {
 // Focus activates the input field.
 func (m *FilterBarModel) Focus() tea.Cmd {
 	m.IsFocused = true
-	m.TextInput.PromptStyle = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("#ffffff")).
-		Background(lipgloss.Color("#1f6feb")).
-		Padding(0, 1)
+	m.RefreshStyles()
 	return m.TextInput.Focus()
 }
 
 // Blur deactivates the input field.
 func (m *FilterBarModel) Blur() {
 	m.IsFocused = false
-	m.TextInput.PromptStyle = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("#58a6ff"))
+	m.RefreshStyles()
 	m.TextInput.Blur()
 }
 
@@ -98,33 +112,54 @@ func (m FilterBarModel) Update(msg tea.Msg) (FilterBarModel, tea.Cmd) {
 
 // View renders the search bar with badge and status.
 func (m FilterBarModel) View() string {
+	m.RefreshStyles()
+
+	bgColor := ColorSurface
+	containerStyle := StyleFilterContainer
+	if m.IsFocused {
+		bgColor = ColorSurfaceFocus
+		containerStyle = StyleFilterContainerFocused
+	}
+
 	var rightParts []string
 
 	if m.Value() != "" {
 		badgeStyle := lipgloss.NewStyle().
-			Background(lipgloss.Color("#238636")).
-			Foreground(lipgloss.Color("#ffffff")).
+			Background(ColorSuccessBg).
+			Foreground(ColorOnAccent).
 			Bold(true).
-			Padding(0, 1)
+			Padding(0, 1).
+			MarginRight(1).
+			MarginBackground(bgColor)
 		rightParts = append(rightParts, badgeStyle.Render(fmt.Sprintf("Filtered (%d/%d)", m.MatchCount, m.TotalCount)))
 
 		clearStyle := lipgloss.NewStyle().
-			Background(lipgloss.Color("#da3633")).
-			Foreground(lipgloss.Color("#ffffff")).
+			Background(ColorDangerBg).
+			Foreground(ColorOnAccent).
 			Bold(true).
 			Padding(0, 1)
 		rightParts = append(rightParts, clearStyle.Render("✖ Clear [Esc]"))
 	} else {
 		if m.Width >= 100 {
 			if m.IsFocused {
-				rightParts = append(rightParts, lipgloss.NewStyle().Foreground(lipgloss.Color("#d29922")).Render("[Enter/Esc to exit]"))
+				rightParts = append(rightParts, lipgloss.NewStyle().
+					Foreground(ColorWarning).
+					Background(bgColor).
+					MarginRight(1).
+					MarginBackground(bgColor).
+					Render("[Enter/Esc to exit]"))
 			} else {
-				rightParts = append(rightParts, lipgloss.NewStyle().Foreground(lipgloss.Color("#7d8590")).Render("[Press '/' to filter]"))
+				rightParts = append(rightParts, lipgloss.NewStyle().
+					Foreground(ColorTextDim).
+					Background(bgColor).
+					MarginRight(1).
+					MarginBackground(bgColor).
+					Render("[Press '/' to filter]"))
 			}
 		}
 		badgeStyle := lipgloss.NewStyle().
-			Background(lipgloss.Color("#21262d")).
-			Foreground(lipgloss.Color("#58a6ff")).
+			Background(ColorBadgeBg).
+			Foreground(ColorActive).
 			Bold(true).
 			Padding(0, 1)
 		rightParts = append(rightParts, badgeStyle.Render(fmt.Sprintf("All (%d)", m.TotalCount)))
@@ -143,29 +178,19 @@ func (m FilterBarModel) View() string {
 	leftContent := m.TextInput.View()
 	leftLen := lipgloss.Width(leftContent)
 
-	availSpace := (m.Width - 2) - leftLen - rightLen
+	innerW := m.Width - 2
+	if innerW < 1 {
+		innerW = 1
+	}
+
+	availSpace := innerW - leftLen - rightLen
 	if availSpace < 0 {
 		availSpace = 0
 	}
-	spacer := strings.Repeat(" ", availSpace)
+	spacer := lipgloss.NewStyle().Background(bgColor).Foreground(ColorText).Render(strings.Repeat(" ", availSpace))
 
 	barContent := lipgloss.JoinHorizontal(lipgloss.Center, leftContent, spacer, rightContent)
+	paintedBar := PaintBarLine(barContent, innerW, bgColor, ColorText)
 
-	containerStyle := lipgloss.NewStyle().
-		Background(lipgloss.Color("#161b22")).
-		BorderBottom(true).
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderBottomForeground(lipgloss.Color("#30363d")).
-		Padding(0, 1)
-
-	if m.IsFocused {
-		containerStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("#0d1b2a")).
-			BorderBottom(true).
-			BorderStyle(lipgloss.NormalBorder()).
-			BorderBottomForeground(lipgloss.Color("#58a6ff")).
-			Padding(0, 1)
-	}
-
-	return containerStyle.Width(m.Width).Render(barContent)
+	return containerStyle.Render(paintedBar)
 }

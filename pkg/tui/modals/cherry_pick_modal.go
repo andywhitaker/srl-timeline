@@ -395,6 +395,7 @@ func NewCherryPickModal(commit models.TimelineCommit, changes []models.PathChang
 	ti.Placeholder = "Or type custom XPath e.g. /interface[name=ethernet-1/1]..."
 	ti.Prompt = "Path: "
 	ti.Width = 60
+	StyleTextInput(&ti, ColorSurface, ColorText, ColorTextDim, ColorActive)
 
 	roots := buildTree(changes, config)
 
@@ -517,6 +518,13 @@ func (m CherryPickModalModel) GetSelectedPaths() []string {
 }
 
 func (m *CherryPickModalModel) visibleRowsCount() int {
+	if m.Height > 0 && m.Height <= 26 {
+		rows := m.Height - 16
+		if rows < 3 {
+			rows = 3
+		}
+		return rows
+	}
 	modalHeight := m.Height - 4
 	if modalHeight < 16 {
 		modalHeight = 16
@@ -624,6 +632,8 @@ func (m *CherryPickModalModel) toggleExpandAll() {
 
 // View renders the cherry-pick subtree selection dialog with interactive tree, checkboxes, and scrolling.
 func (m CherryPickModalModel) View() string {
+	StyleTextInput(&m.CustomInput, ColorSurface, ColorText, ColorTextDim, ColorActive)
+
 	modalWidth := m.Width - 10
 	if modalWidth < 70 {
 		modalWidth = 70
@@ -631,13 +641,20 @@ func (m CherryPickModalModel) View() string {
 	if modalWidth > 98 {
 		modalWidth = 98
 	}
+	if m.Width > 0 && modalWidth > m.Width-2 {
+		modalWidth = m.Width - 2
+	}
+	innerW := modalWidth - 4
+	if innerW < 10 {
+		innerW = 10
+	}
 
 	visibleRows := m.visibleRowsCount()
 
 	title := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("#ffffff")).
-		Background(lipgloss.Color("#d29922")).
+		Foreground(ColorOnAccent).
+		Background(ColorWarning).
 		Padding(0, 1).
 		Render("🍒 CHERRY-PICK CONFIGURATION RESTORE")
 
@@ -661,8 +678,8 @@ func (m CherryPickModalModel) View() string {
 	}
 
 	scrollBadge := lipgloss.NewStyle().
-		Background(lipgloss.Color("#21262d")).
-		Foreground(lipgloss.Color("#58a6ff")).
+		Background(ColorBadgeBg).
+		Foreground(ColorActive).
 		Bold(true).
 		Padding(0, 1).
 		Render(badgeText)
@@ -670,14 +687,17 @@ func (m CherryPickModalModel) View() string {
 	headerBar := lipgloss.JoinHorizontal(
 		lipgloss.Center,
 		title,
-		"   ",
+		lipgloss.NewStyle().Background(ColorSurface).Render("   "),
 		scrollBadge,
 	)
 
+	textStyle := lipgloss.NewStyle().Foreground(ColorText)
 	info := fmt.Sprintf(
-		"Target Commit: %s (%s)\nSelect one or more subtrees/lines to restore onto the live switch:",
-		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#58a6ff")).Render(shaStr),
-		m.Commit.Message,
+		"%s %s %s\n%s",
+		textStyle.Render("Target Commit:"),
+		lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Render(shaStr),
+		textStyle.Render(fmt.Sprintf("(%s)", m.Commit.Message)),
+		textStyle.Render("Select one or more subtrees/lines to restore onto the live switch:"),
 	)
 
 	// Keep selection within scroll viewport
@@ -708,7 +728,8 @@ func (m CherryPickModalModel) View() string {
 	var listSb strings.Builder
 
 	if startIdx > 0 {
-		listSb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")).Italic(true).Render(fmt.Sprintf("  ▲ [%d items above - scroll up]\n", startIdx)))
+		aboveLine := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true).Render(fmt.Sprintf("  ▲ [%d items above - scroll up]", startIdx))
+		listSb.WriteString(PaintBarLine(aboveLine, innerW, ColorSurface, ColorMuted) + "\n")
 	}
 
 	for i := startIdx; i < endIdx; i++ {
@@ -718,9 +739,9 @@ func (m CherryPickModalModel) View() string {
 		isChecked := m.SelectedPaths[node.FullPath]
 		var checkMark string
 		if isChecked {
-			checkMark = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#3fb950")).Render("[✓] ")
+			checkMark = lipgloss.NewStyle().Bold(true).Foreground(ColorSuccess).Render("[✓] ")
 		} else {
-			checkMark = lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")).Render("[ ] ")
+			checkMark = lipgloss.NewStyle().Foreground(ColorMuted).Render("[ ] ")
 		}
 
 		var icon string
@@ -730,63 +751,62 @@ func (m CherryPickModalModel) View() string {
 		if node.IsLeaf {
 			switch node.DiffType {
 			case models.DiffAdded:
-				icon = lipgloss.NewStyle().Foreground(lipgloss.Color("#3fb950")).Render("+ 📄 ")
-				nameStyled = lipgloss.NewStyle().Foreground(lipgloss.Color("#3fb950")).Render(node.Name)
+				icon = lipgloss.NewStyle().Foreground(ColorSuccess).Render("+ 📄 ")
+				nameStyled = lipgloss.NewStyle().Foreground(ColorSuccess).Render(node.Name)
 				if node.NewValue != nil {
-					nameStyled += lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")).Render(fmt.Sprintf(": %v", node.NewValue))
+					nameStyled += lipgloss.NewStyle().Foreground(ColorMuted).Render(fmt.Sprintf(": %v", node.NewValue))
 				}
 			case models.DiffDeleted:
-				icon = lipgloss.NewStyle().Foreground(lipgloss.Color("#f85149")).Render("- 📄 ")
-				nameStyled = lipgloss.NewStyle().Foreground(lipgloss.Color("#f85149")).Render(node.Name)
+				icon = lipgloss.NewStyle().Foreground(ColorDanger).Render("- 📄 ")
+				nameStyled = lipgloss.NewStyle().Foreground(ColorDanger).Render(node.Name)
 				if node.OldValue != nil {
-					nameStyled += lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")).Render(fmt.Sprintf(": %v (deleted)", node.OldValue))
+					nameStyled += lipgloss.NewStyle().Foreground(ColorMuted).Render(fmt.Sprintf(": %v (deleted)", node.OldValue))
 				}
 			case models.DiffModified:
-				icon = lipgloss.NewStyle().Foreground(lipgloss.Color("#d29922")).Render("~ 📄 ")
-				nameStyled = lipgloss.NewStyle().Foreground(lipgloss.Color("#d29922")).Render(node.Name)
+				icon = lipgloss.NewStyle().Foreground(ColorWarning).Render("~ 📄 ")
+				nameStyled = lipgloss.NewStyle().Foreground(ColorWarning).Render(node.Name)
 				if node.NewValue != nil {
-					nameStyled += lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")).Render(fmt.Sprintf(": %v", node.NewValue))
+					nameStyled += lipgloss.NewStyle().Foreground(ColorMuted).Render(fmt.Sprintf(": %v", node.NewValue))
 				}
 			default:
-				icon = lipgloss.NewStyle().Foreground(lipgloss.Color("#79c0ff")).Render("• 📄 ")
-				nameStyled = lipgloss.NewStyle().Foreground(lipgloss.Color("#e6edf3")).Render(node.Name)
+				icon = lipgloss.NewStyle().Foreground(ColorActive).Render("• 📄 ")
+				nameStyled = lipgloss.NewStyle().Foreground(ColorText).Render(node.Name)
 			}
 		} else {
 			if node.Expanded {
-				icon = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#58a6ff")).Render("▼ 📁 ")
+				icon = lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Render("▼ 📁 ")
 			} else {
-				icon = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#8b949e")).Render("▶ 📁 ")
+				icon = lipgloss.NewStyle().Bold(true).Foreground(ColorMuted).Render("▶ 📁 ")
 			}
-			nameStyled = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#e6edf3")).Render(node.Name)
+			nameStyled = lipgloss.NewStyle().Bold(true).Foreground(ColorText).Render(node.Name)
 			if node.ChangeCount == 1 {
-				countBadge = lipgloss.NewStyle().Foreground(lipgloss.Color("#79c0ff")).Render(" (1 change)")
+				countBadge = lipgloss.NewStyle().Foreground(ColorActive).Render(" (1 change)")
 			} else if node.ChangeCount > 1 {
-				countBadge = lipgloss.NewStyle().Foreground(lipgloss.Color("#79c0ff")).Render(fmt.Sprintf(" (%d changes)", node.ChangeCount))
+				countBadge = lipgloss.NewStyle().Foreground(ColorActive).Render(fmt.Sprintf(" (%d changes)", node.ChangeCount))
 			}
 		}
 
 		rowContent := fmt.Sprintf("%s%s%s%s%s", indent, checkMark, icon, nameStyled, countBadge)
 
 		cursor := "  "
+		rowBg := ColorSurface
 		if !m.UseCustom && i == m.SelectedIndex {
-			cursor = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#58a6ff")).Render("➜ ")
-			rowContent = lipgloss.NewStyle().
-				Background(lipgloss.Color("#1f242c")).
-				Bold(true).
-				Render(rowContent)
+			cursor = lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Render("➜ ")
+			rowBg = ColorHighlight
 		}
 
-		listSb.WriteString(fmt.Sprintf("%s%s\n", cursor, rowContent))
+		listSb.WriteString(PaintBarLine(cursor+rowContent, innerW, rowBg, ColorText) + "\n")
 	}
 
 	if endIdx < totalVisible {
-		listSb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")).Italic(true).Render(fmt.Sprintf("  ▼ [%d items below - scroll down]\n", totalVisible-endIdx)))
+		belowLine := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true).Render(fmt.Sprintf("  ▼ [%d items below - scroll down]", totalVisible-endIdx))
+		listSb.WriteString(PaintBarLine(belowLine, innerW, ColorSurface, ColorMuted) + "\n")
 	}
 
 	var summaryTitle string
 	var summaryScope string
 	if m.UseCustom {
-		summaryTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#58a6ff")).Render("Custom XPath: " + m.CustomInput.Value())
+		summaryTitle = lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Render("Custom XPath: " + m.CustomInput.Value())
 		summaryScope = "Applies manually entered XPath"
 	} else if selectedCount > 0 {
 		var sortedSelected []string
@@ -798,11 +818,11 @@ func (m CherryPickModalModel) View() string {
 		if len(samplePaths) > 2 {
 			samplePaths = samplePaths[:2]
 		}
-		summaryTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#3fb950")).Render(fmt.Sprintf("%d items selected (%s...)", selectedCount, strings.Join(samplePaths, ", ")))
+		summaryTitle = lipgloss.NewStyle().Bold(true).Foreground(ColorSuccess).Render(fmt.Sprintf("%d items selected (%s...)", selectedCount, strings.Join(samplePaths, ", ")))
 		summaryScope = fmt.Sprintf("Restores all %d selected paths together atomically in a single candidate commit", selectedCount)
 	} else if len(m.VisibleNodes) > 0 && m.SelectedIndex < len(m.VisibleNodes) {
 		selNode := m.VisibleNodes[m.SelectedIndex]
-		summaryTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#58a6ff")).Render(selNode.FullPath)
+		summaryTitle = lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Render(selNode.FullPath)
 		if selNode.IsLeaf {
 			summaryScope = "Restores individual line / property (Tip: press [Space] or [x] to multi-select)"
 		} else {
@@ -810,39 +830,62 @@ func (m CherryPickModalModel) View() string {
 		}
 	}
 
+	summaryW := innerW - 3
+	if summaryW < 6 {
+		summaryW = 6
+	}
+	summaryLine1 := PaintBarLine(fmt.Sprintf("%s %s", textStyle.Bold(true).Render("Target:"), summaryTitle), summaryW, ColorSurface, ColorText)
+	summaryLine2 := PaintBarLine(fmt.Sprintf("%s %s", textStyle.Bold(true).Render("Scope: "), lipgloss.NewStyle().Foreground(ColorMuted).Render(summaryScope)), summaryW, ColorSurface, ColorText)
 	selectedSummary := lipgloss.NewStyle().
-		Background(lipgloss.Color("#161b22")).
+		Background(ColorSurface).
+		Foreground(ColorText).
 		Border(lipgloss.NormalBorder(), false, false, false, true).
-		BorderForeground(lipgloss.Color("#1f6feb")).
+		BorderForeground(ColorPrimary).
+		BorderBackground(ColorSurface).
 		Padding(0, 1).
-		Width(modalWidth - 6).
-		Render(fmt.Sprintf(
-			"Target: %s\nScope:  %s",
-			summaryTitle,
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")).Render(summaryScope),
-		))
+		Render(summaryLine1 + "\n" + summaryLine2)
 
-	customPrompt := "Custom XPath:"
+	customPrompt := textStyle.Render("Custom XPath:")
 	if m.UseCustom {
-		customPrompt = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#58a6ff")).Render("▶ Custom XPath:")
+		customPrompt = lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Render("▶ Custom XPath:")
 	}
 	customView := fmt.Sprintf("%s\n%s", customPrompt, m.CustomInput.View())
 
-	footer := lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")).Render(
+	footerRaw := lipgloss.NewStyle().Foreground(ColorMuted).Render(
 		"[Space/x] Toggle  |  [a] Select All  |  [→/←] Expand/Collapse  |  [e] Expand All  |  [Tab] Custom  |  [Enter] Apply  |  [Esc] Cancel",
 	)
+	footer := PaintLine(footerRaw, innerW, ColorSurface, ColorMuted)
 
-	content := fmt.Sprintf("%s\n\n%s\n\n%s\n%s\n\n%s\n\n%s", headerBar, info, listSb.String(), selectedSummary, customView, footer)
+	listBlock := strings.TrimSuffix(listSb.String(), "\n")
+	compact := m.Height > 0 && m.Height <= 26
+	vPad := 1
+	var content string
+	if compact {
+		vPad = 0
+		content = fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s", headerBar, info, listBlock, selectedSummary, customView, footer)
+	} else {
+		content = fmt.Sprintf("%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s", headerBar, info, listBlock, selectedSummary, customView, footer)
+	}
+	paintedContent := PaintSurface(content, innerW, 0, ColorSurface, ColorText)
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#d29922")).
-		Background(lipgloss.Color("#0d1117")).
-		Padding(1, 2).
-		Width(modalWidth).
-		Render(content)
+		BorderForeground(ColorWarning).
+		BorderBackground(ColorSurface).
+		Background(ColorSurface).
+		Foreground(ColorText).
+		Padding(vPad, 2).
+		Render(paintedContent)
 
-	return lipgloss.Place(m.Width, m.Height, lipgloss.Center, lipgloss.Center, box)
+	return lipgloss.Place(
+		m.Width,
+		m.Height,
+		lipgloss.Center,
+		lipgloss.Center,
+		box,
+		lipgloss.WithWhitespaceBackground(ColorBackground),
+		lipgloss.WithWhitespaceForeground(ColorTextDim),
+	)
 }
 
 // Update processes cherry-pick selection key and mouse events.

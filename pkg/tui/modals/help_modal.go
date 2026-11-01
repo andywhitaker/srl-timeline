@@ -23,8 +23,8 @@ func NewHelpModal(width, height int) HelpModalModel {
 func (m HelpModalModel) View() string {
 	title := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color("#ffffff")).
-		Background(lipgloss.Color("#1f6feb")).
+		Foreground(ColorOnAccent).
+		Background(ColorPrimary).
 		Padding(0, 1).
 		Render("⌨️ KEYBOARD SHORTCUTS & NAVIGATION")
 
@@ -45,32 +45,73 @@ func (m HelpModalModel) View() string {
 		{"R / F5", "Live reload / refresh timeline from disk"},
 		{"e", "Export configuration to file or startup config"},
 		{"g", "Remote Git settings & synchronization"},
+		{"T", "Cycle color theme (Dark, Cobalt2, Monokai, Solarized, ...)"},
 		{"?", "Show this Help modal"},
 		{"q", "Quit application"},
 	}
 
-	var sb strings.Builder
-	for _, sc := range shortcuts {
-		k := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#58a6ff")).Render(fmt.Sprintf("%-12s", sc[0]))
-		d := lipgloss.NewStyle().Foreground(lipgloss.Color("#e6edf3")).Render(sc[1])
-		sb.WriteString(fmt.Sprintf("%s : %s\n", k, d))
+	keyStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorActive)
+	sepStyle := lipgloss.NewStyle().Foreground(ColorMuted)
+	descStyle := lipgloss.NewStyle().Foreground(ColorText)
+
+	innerW := 66
+	if m.Width > 0 && m.Width-6 < innerW {
+		innerW = m.Width - 6
+	}
+	if innerW < 10 {
+		innerW = 10
 	}
 
-	footer := lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e")).Render(
-		"\nPress [Esc], [Enter], or [?] to close",
-	)
+	var sb strings.Builder
+	for _, sc := range shortcuts {
+		k := keyStyle.Render(fmt.Sprintf("%-13s", sc[0]))
+		sep := sepStyle.Render(" : ")
+		d := descStyle.Render(sc[1])
+		sb.WriteString(PaintBarLine(fmt.Sprintf("%s%s%s", k, sep, d), innerW, ColorSurface, ColorText) + "\n")
+	}
 
-	content := fmt.Sprintf("%s\n\n%s%s", title, sb.String(), footer)
+	compact := m.Height > 0 && m.Height < 28
+	footerText := "Press [Esc], [Enter], or [?] to close"
+	if !compact {
+		footerText = "\n" + footerText
+	}
+	footer := lipgloss.NewStyle().Foreground(ColorMuted).Render(footerText)
+
+	var content string
+	vPad := 1
+	if compact {
+		vPad = 0
+		content = fmt.Sprintf("%s\n%s%s", title, sb.String(), footer)
+	} else {
+		content = fmt.Sprintf("%s\n\n%s%s", title, sb.String(), footer)
+	}
+	maxInnerH := 0
+	if m.Height > 2+vPad*2 {
+		lines := strings.Split(content, "\n")
+		if len(lines) > m.Height-(2+vPad*2) {
+			maxInnerH = m.Height - (2 + vPad*2)
+		}
+	}
+	paintedContent := PaintSurface(content, innerW, maxInnerH, ColorSurface, ColorText)
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#58a6ff")).
-		Background(lipgloss.Color("#161b22")).
-		Padding(1, 2).
-		Width(65).
-		Render(content)
+		BorderForeground(ColorActive).
+		BorderBackground(ColorSurface).
+		Background(ColorSurface).
+		Foreground(ColorText).
+		Padding(vPad, 2).
+		Render(paintedContent)
 
-	return lipgloss.Place(m.Width, m.Height, lipgloss.Center, lipgloss.Center, box)
+	return lipgloss.Place(
+		m.Width,
+		m.Height,
+		lipgloss.Center,
+		lipgloss.Center,
+		box,
+		lipgloss.WithWhitespaceBackground(ColorBackground),
+		lipgloss.WithWhitespaceForeground(ColorTextDim),
+	)
 }
 
 // Update processes help modal close events.

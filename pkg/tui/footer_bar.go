@@ -44,6 +44,7 @@ func (m FooterBarModel) View(filterActive bool) string {
 			{"p", "Cherry"},
 			{"e", "Export"},
 			{"g", "Git"},
+			{"T", "Theme"},
 			{"?", "Help"},
 			{"q", "Quit"},
 		}...)
@@ -56,6 +57,7 @@ func (m FooterBarModel) View(filterActive bool) string {
 			{"Tab", "Pane"},
 			{"d/c/b", "View"},
 			{"r", "Restore"},
+			{"T", "Theme"},
 			{"?", "Help"},
 			{"q", "Quit"},
 		}...)
@@ -69,5 +71,10 @@ func (m FooterBarModel) View(filterActive bool) string {
 	}
 
 	bar := lipgloss.JoinHorizontal(lipgloss.Center, parts...)
-	return StyleFooterContainer.Width(m.Width).Render(bar)
+	innerW := m.Width - 2
+	if innerW < 1 {
+		innerW = 1
+	}
+	paintedBar := PaintBarLine(bar, innerW, ColorSurface, ColorTextSecondary)
+	return StyleFooterContainer.Render(paintedBar)
 }
