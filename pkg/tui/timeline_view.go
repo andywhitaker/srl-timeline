@@ -5,29 +5,37 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/truncate"
 
 	"timeline/pkg/models"
 )
+
+const timelineLinesPerCommit = 2
 
 // TimelineViewModel handles the interactive visual timeline tree graph.
 type TimelineViewModel struct {
 	Commits       []models.TimelineCommit
 	SelectedIndex int
+	BaseCommitSHA string
+	HeadSHA       string
+	FilterQuery   string
 	Viewport      viewport.Model
 	Width         int
 	Height        int
 	IsFocused     bool
+
+	selectedSHA         string
+	lastRenderedFocused bool
+	lastRenderedBaseSHA string
+	lastRenderedFilter  string
 }
 
 // NewTimelineViewModel creates a new visual timeline component.
 func NewTimelineViewModel(width, height int) TimelineViewModel {
-	vpHeight := height - 1
-	if vpHeight < 1 {
-		vpHeight = 1
-	}
-	vp := viewport.New(width, vpHeight)
+	vpW := timelineViewportWidth(width)
+	vpH := timelineViewportHeight(height)
+	vp := viewport.New(vpW, vpH)
 	return TimelineViewModel{
 		Commits:       []models.TimelineCommit{},
 		SelectedIndex: 0,
@@ -38,16 +46,87 @@ func NewTimelineViewModel(width, height int) TimelineViewModel {
 	}
 }
 
-// SetCommits updates the timeline commits list and rebuilds viewport content.
+func timelineViewportWidth(width int) int {
+	if width > 4 {
+		return width - 1 // reserve 1 col for slim scrollbar
+	}
+	if width < 1 {
+		return 1
+	}
+	return width
+}
+
+func timelineViewportHeight(height int) int {
+	if height < 1 {
+		return 1
+	}
+	return height
+}
+
+// LinesPerCommit returns the fixed visual height (in rows) of each timeline commit card.
+func (m TimelineViewModel) LinesPerCommit() int {
+	return timelineLinesPerCommit
+}
+
+// SetCommits updates the timeline commits list while preserving selection by FullSHA,
+// rebuilds viewport content, and keeps the selected commit visible.
 func (m *TimelineViewModel) SetCommits(commits []models.TimelineCommit) {
+	prevSHA := m.selectedSHA
+	if cur := m.SelectedCommit(); cur != nil && cur.FullSHA != "" {
+		prevSHA = cur.FullSHA
+	}
+
 	m.Commits = commits
-	if m.SelectedIndex >= len(commits) {
-		m.SelectedIndex = len(commits) - 1
-	}
-	if m.SelectedIndex < 0 {
+	if len(commits) == 0 {
 		m.SelectedIndex = 0
+		m.Viewport.SetYOffset(0)
+		m.UpdateViewportContent()
+		return
 	}
+
+	matched := false
+	if prevSHA != "" {
+		for i, c := range commits {
+			if c.FullSHA == prevSHA {
+				m.SelectedIndex = i
+				matched = true
+				break
+			}
+		}
+	}
+	if !matched {
+		if m.SelectedIndex >= len(commits) {
+			m.SelectedIndex = len(commits) - 1
+		}
+		if m.SelectedIndex < 0 {
+			m.SelectedIndex = 0
+		}
+	}
+	m.selectedSHA = commits[m.SelectedIndex].FullSHA
+
 	m.UpdateViewportContent()
+	m.ensureVisible()
+}
+
+// SelectIndex moves selection directly to idx (clamped), refreshes content, and scrolls into view.
+func (m *TimelineViewModel) SelectIndex(idx int) {
+	if len(m.Commits) == 0 {
+		m.SelectedIndex = 0
+		m.selectedSHA = ""
+		m.Viewport.SetYOffset(0)
+		m.UpdateViewportContent()
+		return
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(m.Commits) {
+		idx = len(m.Commits) - 1
+	}
+	m.SelectedIndex = idx
+	m.selectedSHA = m.Commits[idx].FullSHA
+	m.UpdateViewportContent()
+	m.ensureVisible()
 }
 
 // SelectedCommit returns currently active commit, or nil.
@@ -61,36 +140,28 @@ func (m *TimelineViewModel) SelectedCommit() *models.TimelineCommit {
 // Next moves selection down.
 func (m *TimelineViewModel) Next() {
 	if m.SelectedIndex < len(m.Commits)-1 {
-		m.SelectedIndex++
-		m.UpdateViewportContent()
-		m.ensureVisible()
+		m.SelectIndex(m.SelectedIndex + 1)
 	}
 }
 
 // Prev moves selection up.
 func (m *TimelineViewModel) Prev() {
 	if m.SelectedIndex > 0 {
-		m.SelectedIndex--
-		m.UpdateViewportContent()
-		m.ensureVisible()
+		m.SelectIndex(m.SelectedIndex - 1)
 	}
 }
 
 // GotoTop moves selection to the first commit.
 func (m *TimelineViewModel) GotoTop() {
 	if len(m.Commits) > 0 && m.SelectedIndex != 0 {
-		m.SelectedIndex = 0
-		m.UpdateViewportContent()
-		m.ensureVisible()
+		m.SelectIndex(0)
 	}
 }
 
 // GotoBottom moves selection to the last commit.
 func (m *TimelineViewModel) GotoBottom() {
 	if len(m.Commits) > 0 && m.SelectedIndex != len(m.Commits)-1 {
-		m.SelectedIndex = len(m.Commits) - 1
-		m.UpdateViewportContent()
-		m.ensureVisible()
+		m.SelectIndex(len(m.Commits) - 1)
 	}
 }
 
@@ -99,16 +170,11 @@ func (m *TimelineViewModel) PageUp() {
 	if len(m.Commits) == 0 {
 		return
 	}
-	step := (m.Height - 1) / 3
+	step := m.Viewport.Height / timelineLinesPerCommit
 	if step < 1 {
-		step = 5
+		step = 1
 	}
-	m.SelectedIndex -= step
-	if m.SelectedIndex < 0 {
-		m.SelectedIndex = 0
-	}
-	m.UpdateViewportContent()
-	m.ensureVisible()
+	m.SelectIndex(m.SelectedIndex - step)
 }
 
 // PageDown moves selection down by a page of commits.
@@ -116,25 +182,33 @@ func (m *TimelineViewModel) PageDown() {
 	if len(m.Commits) == 0 {
 		return
 	}
-	step := (m.Height - 1) / 3
+	step := m.Viewport.Height / timelineLinesPerCommit
 	if step < 1 {
-		step = 5
+		step = 1
 	}
-	m.SelectedIndex += step
-	if m.SelectedIndex >= len(m.Commits) {
-		m.SelectedIndex = len(m.Commits) - 1
-	}
-	m.UpdateViewportContent()
-	m.ensureVisible()
+	m.SelectIndex(m.SelectedIndex + step)
 }
 
 func (m *TimelineViewModel) ensureVisible() {
-	// Each commit occupies roughly 3 lines in the visual graph
-	targetY := m.SelectedIndex * 3
+	if len(m.Commits) == 0 {
+		m.Viewport.SetYOffset(0)
+		return
+	}
+	vpH := m.Viewport.Height
+	if vpH < 1 {
+		vpH = timelineViewportHeight(m.Height)
+	}
+	targetY := m.SelectedIndex * timelineLinesPerCommit
+	targetEnd := targetY + timelineLinesPerCommit - 1
+
 	if targetY < m.Viewport.YOffset {
 		m.Viewport.SetYOffset(targetY)
-	} else if targetY >= m.Viewport.YOffset+m.Height-3 {
-		m.Viewport.SetYOffset(targetY - m.Height + 4)
+	} else if targetEnd >= m.Viewport.YOffset+vpH {
+		nextOff := targetEnd - vpH + 1
+		if nextOff < 0 {
+			nextOff = 0
+		}
+		m.Viewport.SetYOffset(nextOff)
 	}
 }
 
@@ -142,181 +216,302 @@ func (m *TimelineViewModel) ensureVisible() {
 func (m *TimelineViewModel) SetSize(width, height int) {
 	m.Width = width
 	m.Height = height
-	m.Viewport.Width = width
-	vpHeight := height - 1
-	if vpHeight < 1 {
-		vpHeight = 1
-	}
-	m.Viewport.Height = vpHeight
+	m.Viewport.Width = timelineViewportWidth(width)
+	m.Viewport.Height = timelineViewportHeight(height)
 	m.UpdateViewportContent()
+	m.ensureVisible()
 }
 
-// UpdateViewportContent renders the visual tree graph into string content.
+// UpdateViewportContent renders the compact 2-line commit cards into viewport content.
 func (m *TimelineViewModel) UpdateViewportContent() {
-	rowW := m.Width
-	if rowW < 1 {
-		rowW = 1
-	}
+	vpW := timelineViewportWidth(m.Width)
+	vpH := timelineViewportHeight(m.Height)
+	m.Viewport.Width = vpW
+	m.Viewport.Height = vpH
+
+	m.lastRenderedFocused = m.IsFocused
+	m.lastRenderedBaseSHA = m.BaseCommitSHA
+	m.lastRenderedFilter = m.FilterQuery
 
 	if len(m.Commits) == 0 {
-		emptyMsg := "  No commits recorded yet.\n  Configuration changes will appear here in realtime."
-		m.Viewport.SetContent(PaintSurface(emptyMsg, rowW, 2, ColorBackground, ColorMuted))
+		var emptyMsg string
+		if q := strings.TrimSpace(m.FilterQuery); q != "" {
+			emptyMsg = fmt.Sprintf("No commits match filter '%s'\nPress Esc to clear filter.", q)
+		} else {
+			emptyMsg = "No commits recorded yet.\nConfiguration changes will appear here in realtime."
+		}
+		var padded []string
+		padded = append(padded, PaintLine("", vpW, ColorBackground, ColorMuted))
+		for _, line := range strings.Split(emptyMsg, "\n") {
+			padded = append(padded, PaintLine(" "+line, vpW, ColorBackground, ColorMuted))
+		}
+		m.Viewport.SetContent(strings.Join(padded, "\n"))
+		m.Viewport.SetYOffset(0)
 		return
 	}
 
-	var rows []string
+	rows := make([]string, 0, len(m.Commits)*timelineLinesPerCommit)
 	total := len(m.Commits)
+	unfiltered := strings.TrimSpace(m.FilterQuery) == ""
 
 	for i, c := range m.Commits {
 		isSelected := i == m.SelectedIndex
+		isHead := false
+		if m.HeadSHA != "" {
+			isHead = c.FullSHA == m.HeadSHA
+		} else {
+			isHead = c.IsCurrent || (unfiltered && i == 0)
+		}
+		isRoot := c.IsStartup || (unfiltered && i == total-1)
+		isBase := m.BaseCommitSHA != "" && c.FullSHA == m.BaseCommitSHA
+
 		rowBg := ColorBackground
 		rowFg := ColorText
+		var accentBar string
 		if isSelected {
-			rowBg = ColorHighlight
+			if m.IsFocused {
+				rowBg = ColorHighlight
+				accentBar = lipgloss.NewStyle().Foreground(ColorActive).Background(rowBg).Render(GlyphBar)
+			} else {
+				rowBg = ColorSurface
+				accentBar = lipgloss.NewStyle().Foreground(ColorMuted).Background(rowBg).Render(GlyphBar)
+			}
+		} else {
+			accentBar = lipgloss.NewStyle().Background(rowBg).Render(" ")
 		}
 
-		// Determine graph glyphs
-		var branchGlyph, connectorGlyph string
-		isRoot := (i == total - 1)
-		isHead := (i == 0)
+		// Node glyph: check c.IsRestored BEFORE isHead/isRoot so Restore/Cherry-Pick
+		// commits ALWAYS display ◆ (GlyphMilestone), even at HEAD or selected.
+		var nodeGlyph string
+		nodeStyle := lipgloss.NewStyle().Background(rowBg)
+		switch {
+		case c.IsRestored:
+			nodeGlyph = GlyphMilestone
+			nodeStyle = nodeStyle.Bold(true).Foreground(ColorWarning)
+		case isSelected:
+			nodeGlyph = GlyphSelected
+			if m.IsFocused {
+				nodeStyle = nodeStyle.Bold(true).Foreground(ColorActive)
+			} else {
+				nodeStyle = nodeStyle.Foreground(ColorMuted)
+			}
+		case isHead:
+			nodeGlyph = GlyphLive
+			nodeStyle = nodeStyle.Bold(true).Foreground(ColorSuccess)
+		case isRoot:
+			nodeGlyph = GlyphEmpty
+			nodeStyle = nodeStyle.Foreground(ColorMuted)
+		default:
+			nodeGlyph = GlyphPaused
+			nodeStyle = nodeStyle.Foreground(ColorMuted)
+		}
+		nodeStyled := nodeStyle.Render(nodeGlyph)
 
+		// Commit ID
+		shaStyled := lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Background(rowBg).Render(c.CommitID)
+
+		// Micro-badges
+		var badges []string
 		if isHead {
-			if total == 1 {
-				branchGlyph = "●"
-				connectorGlyph = " "
-			} else {
-				branchGlyph = "●"
-				connectorGlyph = "│"
-			}
-		} else if isRoot {
-			branchGlyph = "└─○"
-			connectorGlyph = "  "
-		} else {
-			if c.IsRestored {
-				branchGlyph = "├─◆"
-			} else {
-				branchGlyph = "├─○"
-			}
-			connectorGlyph = "│ │"
+			badges = append(badges, lipgloss.NewStyle().
+				Background(ColorSuccessBg).
+				Foreground(ColorOnAccent).
+				Bold(true).
+				Render("HEAD"))
+		}
+		if isBase {
+			badges = append(badges, lipgloss.NewStyle().
+				Background(ColorPrimary).
+				Foreground(ColorOnAccent).
+				Bold(true).
+				Render("BASE"))
+		}
+		if c.IsRestored {
+			badges = append(badges, lipgloss.NewStyle().
+				Background(ColorWarningBg).
+				Foreground(ColorOnWarning).
+				Bold(true).
+				Render("RSTR"))
+		}
+		if isRoot {
+			badges = append(badges, lipgloss.NewStyle().
+				Background(ColorBadgeBg).
+				Foreground(ColorMuted).
+				Render("INIT"))
 		}
 
-		// Cursor indicator
-		cursor := "  "
+		// Author
+		authorName := strings.TrimSpace(c.Author)
+		if authorName == "" {
+			authorName = "unknown"
+		}
+		if len([]rune(authorName)) > 12 {
+			authorName = truncate.StringWithTail(authorName, 12, "…")
+		}
+		authorStyle := StyleAuthorOther.Background(rowBg)
+		if authorName == "admin" || authorName == "root" {
+			authorStyle = StyleAuthorAdmin.Background(rowBg)
+		}
+		authorStyled := authorStyle.Render(authorName)
+
+		// Relative time
+		relTime := c.RelativeTime()
+		timeStyled := lipgloss.NewStyle().Foreground(ColorTextDim).Background(rowBg).Render(relTime)
+
+		// Color-coded multi-part DiffStat tokens (+N green, ~N warning, -N danger)
+		statStyled := formatDiffStatTokens(c.DiffStat, rowBg)
+
+		// Progressive assembly of Line 1 so we fit cleanly into vpW without clipping essential fields.
+		sp := lipgloss.NewStyle().Background(rowBg).Render(" ")
+		line1Str := accentBar + nodeStyled + sp + shaStyled
+		usedW := lipgloss.Width(line1Str)
+
+		for _, b := range badges {
+			bw := lipgloss.Width(b)
+			if usedW+1+bw <= vpW {
+				line1Str += sp + b
+				usedW += 1 + bw
+			}
+		}
+
+		if aw := lipgloss.Width(authorStyled); usedW+1+aw <= vpW {
+			line1Str += sp + authorStyled
+			usedW += 1 + aw
+		}
+
+		if tw := lipgloss.Width(timeStyled); usedW+1+tw <= vpW {
+			line1Str += sp + timeStyled
+			usedW += 1 + tw
+		}
+
+		if statStyled != "" {
+			if sw := lipgloss.Width(statStyled); usedW+1+sw <= vpW {
+				line1Str += sp + statStyled
+			}
+		}
+
+		// Line 2: <accentBar><rail> <subtitle>
+		// Rail is 1-col │ directly under <nodeGlyph>, or space on root / final row.
+		railGlyph := GlyphPipe
+		if isRoot || i == total-1 {
+			railGlyph = " "
+		}
+		railStyled := lipgloss.NewStyle().Foreground(ColorBorder).Background(rowBg).Render(railGlyph)
+
+		subtitle := commitSubtitle(c)
+		maxSubW := vpW - 3 // accentBar (1) + rail (1) + space (1)
+		if maxSubW < 4 {
+			maxSubW = 4
+		}
+		if lipgloss.Width(subtitle) > maxSubW {
+			subtitle = truncate.StringWithTail(subtitle, uint(maxSubW), "…")
+		}
+
+		subFg := ColorMuted
+		subStyle := lipgloss.NewStyle().Foreground(subFg).Background(rowBg)
 		if isSelected {
-			cursor = StyleSelectedRow.Render("▶ ")
+			subFg = ColorText
+			subStyle = lipgloss.NewStyle().Foreground(subFg).Background(rowBg).Bold(m.IsFocused)
 		}
+		line2Str := accentBar + railStyled + sp + subStyle.Render(subtitle)
 
-		// Author badge styling
-		authorStyle := StyleAuthorOther
-		if c.Author == "admin" || c.Author == "root" {
-			authorStyle = StyleAuthorAdmin
-		}
-
-		// Format line 1: Node + SHA + Author + Time + Stat badge
-		var nodeStyled string
-		if isSelected {
-			nodeStyled = StyleTimelineNodeActive.Render(branchGlyph)
-		} else if c.IsRestored {
-			nodeStyled = StyleTimelineNodeMilestone.Render(branchGlyph)
-		} else {
-			nodeStyled = StyleTimelineNodeNormal.Render(branchGlyph)
-		}
-
-		shaStyled := lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Render(c.CommitID)
-		authorStyled := authorStyle.Render(fmt.Sprintf("[%s]", c.Author))
-		timeStyled := lipgloss.NewStyle().Foreground(ColorTextDim).Render(c.RelativeTime())
-
-		var statStyled string
-		if c.DiffStat != "" && c.DiffStat != "-" {
-			if strings.HasPrefix(c.DiffStat, "+") {
-				statStyled = StyleDiffStatAdd.Render(fmt.Sprintf("[%s]", c.DiffStat))
-			} else if strings.HasPrefix(c.DiffStat, "-") {
-				statStyled = StyleDiffStatDel.Render(fmt.Sprintf("[%s]", c.DiffStat))
-			} else {
-				statStyled = StyleDiffStatMod.Render(fmt.Sprintf("[%s]", c.DiffStat))
-			}
-		}
-
-		headerLine := fmt.Sprintf("%s%s %s %s %s %s", cursor, nodeStyled, shaStyled, authorStyled, timeStyled, statStyled)
-		if m.Width > 0 && lipgloss.Width(headerLine) > m.Width {
-			headerLine = fmt.Sprintf("%s%s %s %s %s", cursor, nodeStyled, shaStyled, authorStyled, timeStyled)
-			if lipgloss.Width(headerLine) > m.Width {
-				headerLine = fmt.Sprintf("%s%s %s %s", cursor, nodeStyled, shaStyled, authorStyled)
-			}
-		}
-
-		// Format line 2: Connector + Message
-		connectorStyled := StyleTimelineLine.Render(connectorGlyph)
-		msgStr := c.Message
-		maxMsgLen := m.Width - 10
-		msgRunes := []rune(msgStr)
-		if maxMsgLen > 5 && len(msgRunes) > maxMsgLen {
-			msgStr = string(msgRunes[:maxMsgLen]) + "…"
-		}
-		msgStyled := StyleCommitMessage.Bold(isSelected).Render(msgStr)
-
-		messageLine := fmt.Sprintf("    %s %s", connectorStyled, msgStyled)
-
-		// Format line 3: Connector spacing
-		spacingLine := fmt.Sprintf("    %s", connectorStyled)
-
-		line1 := PaintBarLine(headerLine, rowW, rowBg, rowFg)
-		line2 := PaintBarLine(messageLine, rowW, rowBg, rowFg)
-		line3 := PaintBarLine(spacingLine, rowW, rowBg, rowFg)
-
-		rows = append(rows, fmt.Sprintf("%s\n%s\n%s", line1, line2, line3))
+		rows = append(rows,
+			PaintBarLine(line1Str, vpW, rowBg, rowFg),
+			PaintBarLine(line2Str, vpW, rowBg, subFg),
+		)
 	}
 
 	m.Viewport.SetContent(strings.Join(rows, "\n"))
 }
 
-// View renders the visual timeline component.
+// commitSubtitle prefers a non-generic user message, else c.SummaryScope, else c.Message.
+func commitSubtitle(c models.TimelineCommit) string {
+	cleanMsg := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(c.Message, "\r", ""), "\n", " "))
+	scope := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(c.SummaryScope, "\r", ""), "\n", " "))
+
+	if cleanMsg != "" && !isGenericCommitMessage(cleanMsg) {
+		// If daemon/gitbackend appended a user comment after " — ", show the user comment cleanly.
+		if strings.HasPrefix(strings.ToLower(cleanMsg), "config commit by ") {
+			if idx := strings.Index(cleanMsg, " — "); idx >= 0 {
+				if comment := strings.TrimSpace(cleanMsg[idx+len(" — "):]); comment != "" {
+					return comment
+				}
+			}
+		}
+		return cleanMsg
+	}
+	if scope != "" {
+		return scope
+	}
+	if cleanMsg != "" {
+		return cleanMsg
+	}
+	return "Configuration update"
+}
+
+func isGenericCommitMessage(msg string) bool {
+	m := strings.TrimSpace(msg)
+	if m == "" {
+		return true
+	}
+	lower := strings.ToLower(m)
+	if strings.HasPrefix(lower, "config commit by ") {
+		if idx := strings.Index(m, " — "); idx >= 0 {
+			if strings.TrimSpace(m[idx+len(" — "):]) != "" {
+				return false
+			}
+		}
+		return true
+	}
+	switch lower {
+	case "configuration change",
+		"config change",
+		"auto-captured configuration change",
+		"initial baseline configuration":
+		return true
+	}
+	return false
+}
+
+// View renders the visual timeline component inside a border-titled box with a slim scrollbar.
 func (m TimelineViewModel) View() string {
-	borderStyle := StyleInactiveBorder
-	headerText := " 📜 TIMELINE "
-	if m.IsFocused {
-		borderStyle = StyleActiveBorder
-		headerText = " 📜 TIMELINE [FOCUSED] "
+	if m.IsFocused != m.lastRenderedFocused ||
+		m.BaseCommitSHA != m.lastRenderedBaseSHA ||
+		m.FilterQuery != m.lastRenderedFilter {
+		prevY := m.Viewport.YOffset
+		m.UpdateViewportContent()
+		m.Viewport.SetYOffset(prevY)
 	}
 
 	innerW := m.Width
 	if innerW < 1 {
 		innerW = 1
 	}
-	vpH := m.Viewport.Height
-	if vpH < 1 {
-		vpH = 1
+	innerH := m.Height
+	if innerH < 1 {
+		innerH = 1
 	}
 
-	header := PaintBarLine(StylePanelHeader.Render(headerText), innerW, ColorSurface, ColorText)
-	content := PaintSurface(m.Viewport.View(), innerW, vpH, ColorBackground, ColorText)
-
-	box := borderStyle.
-		Width(m.Width).
-		Height(m.Height).
-		Render(fmt.Sprintf("%s\n%s", header, content))
-
-	return box
-}
-
-// Update processes Bubble Tea messages.
-func (m TimelineViewModel) Update(msg tea.Msg) (TimelineViewModel, tea.Cmd) {
-	var cmd tea.Cmd
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "j", "down":
-			m.Next()
-		case "k", "up":
-			m.Prev()
+	titleText := "TIMELINE"
+	if len(m.Commits) > 0 {
+		sel := m.SelectedIndex + 1
+		if sel < 1 {
+			sel = 1
 		}
-	case tea.MouseMsg:
-		if msg.Type == tea.MouseWheelUp {
-			m.Prev()
-		} else if msg.Type == tea.MouseWheelDown {
-			m.Next()
+		if sel > len(m.Commits) {
+			sel = len(m.Commits)
 		}
+		titleText = fmt.Sprintf("TIMELINE %d/%d", sel, len(m.Commits))
 	}
-	m.Viewport, cmd = m.Viewport.Update(msg)
-	return m, cmd
+
+	borderFg := ColorBorder
+	titleStyle := lipgloss.NewStyle().Foreground(ColorMuted).Background(ColorBackground)
+	if m.IsFocused {
+		borderFg = ColorActive
+		titleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Background(ColorBackground)
+	}
+	styledTitle := titleStyle.Render(titleText)
+
+	body := renderViewportWithScrollbar(m.Viewport, innerW, innerH, ColorBackground)
+	return RenderTitledBox(styledTitle, body, innerW+2, innerH+2, borderFg, ColorBackground, ColorBackground)
 }
