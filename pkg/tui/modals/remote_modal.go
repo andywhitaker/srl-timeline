@@ -13,6 +13,15 @@ import (
 	"timeline/pkg/models"
 )
 
+const (
+	RemoteFocusURL      = 0
+	RemoteFocusAutoPush = 1
+	RemoteFocusCopyKey  = 2
+	RemoteFocusPushNow  = 3
+	RemoteFocusSave     = 4
+	RemoteFocusCancel   = 5
+)
+
 // RemoteModalModel handles remote Git repository settings with interactive form navigation.
 type RemoteModalModel struct {
 	Config       models.RemoteRepoConfig
@@ -31,7 +40,7 @@ func NewRemoteModal(cfg models.RemoteRepoConfig, width, height int) RemoteModalM
 	ti.Placeholder = "git@github.com:org/srl-configs.git"
 	ti.Prompt = "Remote URL: "
 	ti.SetValue(cfg.URL)
-	ti.Width = 50
+	ti.Width = 48
 	StyleTextInput(&ti, ColorSurface, ColorText, ColorTextDim, ColorActive)
 	ti.Focus()
 
@@ -39,7 +48,7 @@ func NewRemoteModal(cfg models.RemoteRepoConfig, width, height int) RemoteModalM
 		Config:       cfg,
 		URLInput:     ti,
 		AutoPush:     cfg.AutoPush,
-		FocusedIndex: 0,
+		FocusedIndex: RemoteFocusURL,
 		Width:        width,
 		Height:       height,
 	}
@@ -63,42 +72,89 @@ func CopyToClipboard(text string) {
 	_, _ = fmt.Fprint(os.Stdout, osc52)
 }
 
+func (m *RemoteModalModel) setFocus(idx int) {
+	m.FocusedIndex = idx
+	if m.FocusedIndex == RemoteFocusURL {
+		m.URLInput.Focus()
+	} else {
+		m.URLInput.Blur()
+	}
+}
+
+func (m *RemoteModalModel) activateFocused() (save, pushNow, close bool) {
+	switch m.FocusedIndex {
+	case RemoteFocusURL:
+		m.setFocus(RemoteFocusAutoPush)
+		return false, false, false
+	case RemoteFocusAutoPush:
+		m.AutoPush = !m.AutoPush
+		return false, false, false
+	case RemoteFocusCopyKey:
+		CopyToClipboard(m.Config.PublicKey)
+		m.StatusMsg = "✓ Public key copied to clipboard & saved to /tmp/srl_timeline_deploy_key.pub"
+		m.IsError = false
+		return false, false, false
+	case RemoteFocusPushNow:
+		m.Config.URL = strings.TrimSpace(m.URLInput.Value())
+		m.Config.AutoPush = m.AutoPush
+		return true, true, false
+	case RemoteFocusSave:
+		m.Config.URL = strings.TrimSpace(m.URLInput.Value())
+		m.Config.AutoPush = m.AutoPush
+		return true, false, true
+	case RemoteFocusCancel:
+		return false, false, true
+	}
+	return false, false, false
+}
+
 // View renders the remote Git dialog.
 func (m RemoteModalModel) View() string {
+	innerW, vPad, hPad, maxInnerH := modalBoxMetrics(m.Width, m.Height, 66)
+	compact := m.Height > 0 && m.Height <= 24
+	ultraCompact := m.Height > 0 && m.Height <= 14
+
+	urlW := innerW - 18
+	if urlW < 8 {
+		urlW = 8
+	}
+	m.URLInput.Width = urlW
 	StyleTextInput(&m.URLInput, ColorSurface, ColorText, ColorTextDim, ColorActive)
-	innerW := 68
-	if m.Width > 0 && m.Width-6 < innerW {
-		innerW = m.Width - 6
-	}
-	if innerW < 10 {
-		innerW = 10
-	}
 
 	title := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(ColorOnAccent).
-		Background(ColorPurple).
+		Background(ColorPrimary).
 		Padding(0, 1).
-		Render("🌐 REMOTE GIT REPOSITORY SETTINGS")
+		Render("◆ REMOTE GIT REPOSITORY SETTINGS")
 
 	// 1. URL Input Box
 	urlBorderFg := ColorBorder
-	if m.FocusedIndex == 0 {
+	if m.FocusedIndex == RemoteFocusURL {
 		urlBorderFg = ColorActive
 	}
-	urlBoxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(urlBorderFg).
-		BorderBackground(ColorSurface).
-		Background(ColorSurface).
-		Foreground(ColorText).
-		Padding(0, 1)
-	urlInnerW := innerW - 4
-	if urlInnerW < 4 {
-		urlInnerW = 4
+	var urlView string
+	if ultraCompact {
+		prefix := "  "
+		if m.FocusedIndex == RemoteFocusURL {
+			prefix = lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Render("▸ ")
+		}
+		urlView = PaintBarLine(prefix+m.URLInput.View(), innerW, ColorSurface, ColorText)
+	} else {
+		urlInnerW := innerW - 4
+		if urlInnerW < 4 {
+			urlInnerW = 4
+		}
+		urlInner := PaintBarLine(m.URLInput.View(), urlInnerW, ColorSurface, ColorText)
+		urlView = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(urlBorderFg).
+			BorderBackground(ColorSurface).
+			Background(ColorSurface).
+			Foreground(ColorText).
+			Padding(0, 1).
+			Render(urlInner)
 	}
-	urlInner := PaintBarLine(m.URLInput.View(), urlInnerW, ColorSurface, ColorText)
-	urlView := urlBoxStyle.Render(urlInner)
 
 	// 2. Auto-push Checkbox
 	checkMark := "[ ]"
@@ -107,7 +163,7 @@ func (m RemoteModalModel) View() string {
 	}
 	autoPushLabel := fmt.Sprintf("%s Auto-push on every configuration commit", checkMark)
 	autoPushStyle := lipgloss.NewStyle().Padding(0, 1).Background(ColorSurface)
-	if m.FocusedIndex == 1 {
+	if m.FocusedIndex == RemoteFocusAutoPush {
 		autoPushStyle = autoPushStyle.
 			Background(ColorPrimary).
 			Foreground(ColorOnAccent).
@@ -117,117 +173,144 @@ func (m RemoteModalModel) View() string {
 	} else {
 		autoPushStyle = autoPushStyle.Foreground(ColorMuted)
 	}
-	autoPushView := autoPushStyle.Render(autoPushLabel)
+	autoPushView := PaintBarLine(autoPushStyle.Render(autoPushLabel), innerW, ColorSurface, ColorText)
 
-	// 3. Action Buttons
-	btnCopyStyle := lipgloss.NewStyle().Padding(0, 2).MarginRight(1).MarginBackground(ColorSurface).Background(ColorBadgeBg).Foreground(ColorText)
-	if m.FocusedIndex == 2 {
-		btnCopyStyle = btnCopyStyle.Background(ColorWarning).Foreground(ColorOnAccent).Bold(true)
+	// 3. Action Buttons — compact padding so terminals < 72 cols never clip or wrap awkwardly
+	btnCopyStyle := lipgloss.NewStyle().Padding(0, 1).Background(ColorBadgeBg).Foreground(ColorText)
+	if m.FocusedIndex == RemoteFocusCopyKey {
+		btnCopyStyle = btnCopyStyle.Background(ColorWarningBg).Foreground(ColorOnWarning).Bold(true)
 	}
-	btnCopy := btnCopyStyle.Render("📋 Copy Key")
+	btnCopy := btnCopyStyle.Render("Copy Key")
 
-	btnPushStyle := lipgloss.NewStyle().Padding(0, 2).MarginRight(1).MarginBackground(ColorSurface).Background(ColorBadgeBg).Foreground(ColorText)
-	if m.FocusedIndex == 3 {
+	btnPushStyle := lipgloss.NewStyle().Padding(0, 1).Background(ColorBadgeBg).Foreground(ColorText)
+	if m.FocusedIndex == RemoteFocusPushNow {
 		btnPushStyle = btnPushStyle.Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true)
 	}
-	btnPush := btnPushStyle.Render("🚀 Push Now")
+	btnPush := btnPushStyle.Render("Push Now")
 
-	btnSaveStyle := lipgloss.NewStyle().Padding(0, 2).MarginRight(1).MarginBackground(ColorSurface).Background(ColorBadgeBg).Foreground(ColorText)
-	if m.FocusedIndex == 4 {
+	btnSaveStyle := lipgloss.NewStyle().Padding(0, 1).Background(ColorBadgeBg).Foreground(ColorText)
+	if m.FocusedIndex == RemoteFocusSave {
 		btnSaveStyle = btnSaveStyle.Background(ColorSuccessBg).Foreground(ColorOnAccent).Bold(true)
 	}
-	btnSave := btnSaveStyle.Render("💾 Save & Close")
+	btnSave := btnSaveStyle.Render("Save")
 
-	btnCancelStyle := lipgloss.NewStyle().Padding(0, 2).Background(ColorBadgeBg).Foreground(ColorMuted)
-	if m.FocusedIndex == 5 {
+	btnCancelStyle := lipgloss.NewStyle().Padding(0, 1).Background(ColorBadgeBg).Foreground(ColorMuted)
+	if m.FocusedIndex == RemoteFocusCancel {
 		btnCancelStyle = btnCancelStyle.Background(ColorDangerBg).Foreground(ColorOnAccent).Bold(true)
 	}
-	btnCancel := btnCancelStyle.Render("❌ Cancel")
+	btnCancel := btnCancelStyle.Render("Cancel")
 
-	buttonsRow := lipgloss.JoinHorizontal(lipgloss.Center, btnCopy, btnPush, btnSave, btnCancel)
-
-	// 4. Public Key Display (for easy copying to GitHub Deploy Keys)
-	var pubKeySection string
-	if m.Config.PublicKey != "" {
-		keyHeader := lipgloss.NewStyle().Bold(true).Foreground(ColorWarning).Render("🔑 Device Public SSH Key (Add to GitHub Deploy Keys):")
-		keyBox := PaintLine(
-			lipgloss.NewStyle().Foreground(ColorActive).Render(" "+m.Config.PublicKey),
+	gap := lipgloss.NewStyle().Background(ColorSurface).Render(" ")
+	var buttonsRow string
+	if innerW < 40 {
+		row1 := PaintBarLine(lipgloss.JoinHorizontal(lipgloss.Center, btnCopy, gap, btnPush), innerW, ColorSurface, ColorText)
+		row2 := PaintBarLine(lipgloss.JoinHorizontal(lipgloss.Center, btnSave, gap, btnCancel), innerW, ColorSurface, ColorText)
+		buttonsRow = row1 + "\n" + row2
+	} else {
+		buttonsRow = PaintBarLine(
+			lipgloss.JoinHorizontal(lipgloss.Center, btnCopy, gap, btnPush, gap, btnSave, gap, btnCancel),
 			innerW,
-			ColorBackground,
-			ColorActive,
+			ColorSurface,
+			ColorText,
 		)
-		keyHint := lipgloss.NewStyle().Foreground(ColorMuted).Render("💡 Use [Copy Key] or cat /tmp/srl_timeline_deploy_key.pub")
-		pubKeySection = fmt.Sprintf("\n%s\n%s\n%s", keyHeader, keyBox, keyHint)
 	}
 
-	// 5. Status / Error Message
+	// 4. Status / Error Message
 	var statusView string
 	if m.StatusMsg != "" {
 		statusStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorSuccess)
 		if m.IsError {
 			statusStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorDanger)
 		}
-		statusView = statusStyle.Render(fmt.Sprintf("Status: %s", m.StatusMsg))
+		statusView = PaintBarLine(statusStyle.Render("Status: "+truncateDisplay(m.StatusMsg, innerW-8)), innerW, ColorSurface, ColorText)
 	} else if m.Config.SyncStatus != "" {
-		statusView = lipgloss.NewStyle().Foreground(ColorMuted).Render(fmt.Sprintf("Sync Status: %s", m.Config.SyncStatus))
-	}
-
-	footerRaw := lipgloss.NewStyle().Foreground(ColorMuted).Render(
-		"[Tab/↓/↑] Navigate fields  |  [Space/Enter] Toggle / Activate  |  [c] Copy Key  |  [Esc] Close",
-	)
-	footer := PaintLine(footerRaw, innerW, ColorSurface, ColorMuted)
-
-	compact := m.Height > 0 && m.Height <= 24
-	vPad := 1
-	var content string
-	if compact {
-		vPad = 0
-		content = fmt.Sprintf("%s\n%s\n%s\n%s\n%s%s\n%s",
-			title,
-			urlView,
-			autoPushView,
-			buttonsRow,
-			statusView,
-			pubKeySection,
-			footer,
-		)
-	} else {
-		content = fmt.Sprintf("%s\n\n%s\n%s\n\n%s\n\n%s%s\n\n%s",
-			title,
-			urlView,
-			autoPushView,
-			buttonsRow,
-			statusView,
-			pubKeySection,
-			footer,
+		statusView = PaintBarLine(
+			lipgloss.NewStyle().Foreground(ColorMuted).Render("Sync Status: "+truncateDisplay(m.Config.SyncStatus, innerW-13)),
+			innerW,
+			ColorSurface,
+			ColorMuted,
 		)
 	}
 
-	paintedContent := PaintSurface(content, innerW, 0, ColorSurface, ColorText)
+	// 5. Public Key Display (for easy copying to GitHub Deploy Keys)
+	var pubKeyLines []string
+	if m.Config.PublicKey != "" && !ultraCompact {
+		keyHeader := PaintBarLine(
+			lipgloss.NewStyle().Bold(true).Foreground(ColorWarning).Render("● Device Public SSH Key (Deploy Key):"),
+			innerW,
+			ColorSurface,
+			ColorWarning,
+		)
+		pubKeyDisplay := m.Config.PublicKey
+		if compact {
+			pubKeyDisplay = truncateDisplay(pubKeyDisplay, innerW-2)
+			keyBox := PaintBarLine(
+				lipgloss.NewStyle().Foreground(ColorActive).Render(" "+pubKeyDisplay),
+				innerW,
+				ColorBackground,
+				ColorActive,
+			)
+			pubKeyLines = append(pubKeyLines, keyHeader, keyBox)
+		} else {
+			keyBox := PaintLine(
+				lipgloss.NewStyle().Foreground(ColorActive).Render(" "+pubKeyDisplay),
+				innerW,
+				ColorBackground,
+				ColorActive,
+			)
+			keyHint := PaintBarLine(
+				lipgloss.NewStyle().Foreground(ColorMuted).Render("▸ Use [Copy Key] or cat /tmp/srl_timeline_deploy_key.pub"),
+				innerW,
+				ColorSurface,
+				ColorMuted,
+			)
+			pubKeyLines = append(pubKeyLines, keyHeader, keyBox, keyHint)
+		}
+	}
 
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorPurple).
-		BorderBackground(ColorSurface).
-		Background(ColorSurface).
-		Foreground(ColorText).
-		Padding(vPad, 2).
-		Render(paintedContent)
-
-	return lipgloss.Place(
-		m.Width,
-		m.Height,
-		lipgloss.Center,
-		lipgloss.Center,
-		box,
-		lipgloss.WithWhitespaceBackground(ColorBackground),
-		lipgloss.WithWhitespaceForeground(ColorTextDim),
+	footerText := "[Tab/↑/↓/←/→] Navigate  |  [Space/Enter] Activate  |  [c] Copy Key  |  [Esc] Close"
+	if innerW < 58 {
+		footerText = "[Tab/←→] Nav | [Space/Enter] Act | [Esc] Close"
+	}
+	footer := PaintBarLine(
+		lipgloss.NewStyle().Foreground(ColorMuted).Render(footerText),
+		innerW,
+		ColorSurface,
+		ColorMuted,
 	)
+
+	var sections []string
+	sections = append(sections, PaintBarLine(title, innerW, ColorSurface, ColorText))
+	if !compact {
+		sections = append(sections, "")
+	}
+	sections = append(sections, urlView)
+	sections = append(sections, autoPushView)
+	if !compact {
+		sections = append(sections, "")
+	}
+	sections = append(sections, buttonsRow)
+	if statusView != "" {
+		if !compact {
+			sections = append(sections, "")
+		}
+		sections = append(sections, statusView)
+	}
+	if len(pubKeyLines) > 0 {
+		sections = append(sections, strings.Join(pubKeyLines, "\n"))
+	}
+	if !compact {
+		sections = append(sections, "")
+	}
+	sections = append(sections, footer)
+
+	content := strings.Join(sections, "\n")
+	return renderCenteredModal(content, m.Width, m.Height, innerW, vPad, hPad, maxInnerH, ColorPurple)
 }
 
 // Update processes remote settings events.
+// Returns (model, save, pushNow, close).
 func (m RemoteModalModel) Update(msg tea.Msg) (RemoteModalModel, bool, bool, bool) {
-	// Returns (model, save, pushNow, close)
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -235,71 +318,54 @@ func (m RemoteModalModel) Update(msg tea.Msg) (RemoteModalModel, bool, bool, boo
 			return m, false, false, true
 
 		case "tab", "down":
-			m.FocusedIndex = (m.FocusedIndex + 1) % 6
-			if m.FocusedIndex == 0 {
-				m.URLInput.Focus()
-			} else {
-				m.URLInput.Blur()
-			}
+			m.setFocus((m.FocusedIndex + 1) % 6)
 			return m, false, false, false
 
 		case "shift+tab", "up":
-			m.FocusedIndex = (m.FocusedIndex + 5) % 6
-			if m.FocusedIndex == 0 {
-				m.URLInput.Focus()
-			} else {
-				m.URLInput.Blur()
-			}
+			m.setFocus((m.FocusedIndex + 5) % 6)
 			return m, false, false, false
 
-		case " ", "space":
-			if m.FocusedIndex == 1 {
-				m.AutoPush = !m.AutoPush
+		case "right":
+			if m.FocusedIndex >= RemoteFocusCopyKey && m.FocusedIndex <= RemoteFocusCancel {
+				next := m.FocusedIndex + 1
+				if next > RemoteFocusCancel {
+					next = RemoteFocusCopyKey
+				}
+				m.setFocus(next)
 				return m, false, false, false
 			}
 
+		case "left":
+			if m.FocusedIndex >= RemoteFocusCopyKey && m.FocusedIndex <= RemoteFocusCancel {
+				prev := m.FocusedIndex - 1
+				if prev < RemoteFocusCopyKey {
+					prev = RemoteFocusCancel
+				}
+				m.setFocus(prev)
+				return m, false, false, false
+			}
+
+		case " ", "space":
+			if m.FocusedIndex != RemoteFocusURL {
+				save, pushNow, close := m.activateFocused()
+				return m, save, pushNow, close
+			}
+
 		case "c", "k":
-			if m.FocusedIndex != 0 {
+			if m.FocusedIndex != RemoteFocusURL {
 				CopyToClipboard(m.Config.PublicKey)
-				m.StatusMsg = "✓ Public key copied to clipboard & saved to /tmp/srl_timeline_deploy_key.pub!"
+				m.StatusMsg = "✓ Public key copied to clipboard & saved to /tmp/srl_timeline_deploy_key.pub"
 				m.IsError = false
 				return m, false, false, false
 			}
 
 		case "enter":
-			switch m.FocusedIndex {
-			case 0:
-				// Advance from URL to auto-push
-				m.FocusedIndex = 1
-				m.URLInput.Blur()
-				return m, false, false, false
-			case 1:
-				m.AutoPush = !m.AutoPush
-				return m, false, false, false
-			case 2:
-				// Copy key
-				CopyToClipboard(m.Config.PublicKey)
-				m.StatusMsg = "✓ Public key copied to clipboard & saved to /tmp/srl_timeline_deploy_key.pub!"
-				m.IsError = false
-				return m, false, false, false
-			case 3:
-				// Push now
-				m.Config.URL = strings.TrimSpace(m.URLInput.Value())
-				m.Config.AutoPush = m.AutoPush
-				return m, true, true, false
-			case 4:
-				// Save & Close
-				m.Config.URL = strings.TrimSpace(m.URLInput.Value())
-				m.Config.AutoPush = m.AutoPush
-				return m, true, false, true
-			case 5:
-				// Cancel
-				return m, false, false, true
-			}
+			save, pushNow, close := m.activateFocused()
+			return m, save, pushNow, close
 		}
 	}
 
-	if m.FocusedIndex == 0 {
+	if m.FocusedIndex == RemoteFocusURL {
 		var cmd tea.Cmd
 		m.URLInput, cmd = m.URLInput.Update(msg)
 		_ = cmd
