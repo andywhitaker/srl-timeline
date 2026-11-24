@@ -9,6 +9,16 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// HitChip represents the half-open horizontal column range [StartX, EndX)
+// of a clickable quick-filter chip on the filter bar.
+type HitChip struct {
+	Label  string
+	StartX int
+	EndX   int
+}
+
+var defaultQuickFilterChips = []string{"interface", "bgp", "ospf", "acl", "system"}
+
 // FilterBarModel manages the search and scoped filter input bar.
 type FilterBarModel struct {
 	TextInput  textinput.Model
@@ -21,12 +31,12 @@ type FilterBarModel struct {
 // NewFilterBarModel creates a new FilterBar component.
 func NewFilterBarModel(width int) FilterBarModel {
 	ti := textinput.New()
-	ti.Placeholder = "path (e.g. interface, bgp)"
-	ti.Prompt = " 🔍 FILTER: "
+	ti.Placeholder = "Filter path (e.g. interface, bgp, ospf)..."
+	ti.Prompt = "/ "
 
-	inputW := width - 36
-	if inputW < 12 {
-		inputW = 12
+	inputW := width - 24
+	if inputW < 10 {
+		inputW = 10
 	}
 	ti.Width = inputW
 
@@ -52,9 +62,8 @@ func (m *FilterBarModel) RefreshStyles() {
 	if m.IsFocused {
 		m.TextInput.PromptStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(ColorOnAccent).
-			Background(ColorPrimary).
-			Padding(0, 1)
+			Foreground(ColorActive).
+			Background(bgColor)
 	} else {
 		m.TextInput.PromptStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -96,9 +105,9 @@ func (m *FilterBarModel) Clear() {
 // SetWidth handles terminal resizing.
 func (m *FilterBarModel) SetWidth(width int) {
 	m.Width = width
-	inputW := width - 42
-	if inputW < 12 {
-		inputW = 12
+	inputW := width - 24
+	if inputW < 10 {
+		inputW = 10
 	}
 	m.TextInput.Width = inputW
 }
@@ -110,87 +119,241 @@ func (m FilterBarModel) Update(msg tea.Msg) (FilterBarModel, tea.Cmd) {
 	return m, cmd
 }
 
-// View renders the search bar with badge and status.
-func (m FilterBarModel) View() string {
+type filterBarLayout struct {
+	line        string
+	chips       []HitChip
+	clearStartX int
+	clearEndX   int
+}
+
+func (m FilterBarModel) computeLayout() filterBarLayout {
+	if m.Width <= 0 {
+		return filterBarLayout{clearStartX: -1, clearEndX: -1}
+	}
+
 	m.RefreshStyles()
 
 	bgColor := ColorSurface
-	containerStyle := StyleFilterContainer
 	if m.IsFocused {
 		bgColor = ColorSurfaceFocus
-		containerStyle = StyleFilterContainerFocused
 	}
 
+	if m.Width < 4 {
+		return filterBarLayout{
+			line:        PaintBarLine("/", m.Width, bgColor, ColorActive),
+			clearStartX: -1,
+			clearEndX:   -1,
+		}
+	}
+
+	innerW := m.Width - 2 // 1-col left and right padding
+
+	// Build right cluster: [match count badge] [  [× Clear]]
 	var rightParts []string
+	hasFilter := m.Value() != ""
+	var clearBtnStr string
+	clearBtnW := 0
+	showClear := false
 
-	if m.Value() != "" {
-		badgeStyle := lipgloss.NewStyle().
-			Background(ColorSuccessBg).
-			Foreground(ColorOnAccent).
-			Bold(true).
-			Padding(0, 1).
-			MarginRight(1).
-			MarginBackground(bgColor)
-		rightParts = append(rightParts, badgeStyle.Render(fmt.Sprintf("Filtered (%d/%d)", m.MatchCount, m.TotalCount)))
+	if m.TotalCount > 0 {
+		countText := fmt.Sprintf("%d/%d", m.MatchCount, m.TotalCount)
+		var countStyle lipgloss.Style
+		if hasFilter {
+			if m.MatchCount == 0 {
+				countStyle = lipgloss.NewStyle().
+					Background(ColorWarningBg).
+					Foreground(ColorOnWarning).
+					Bold(true).
+					Padding(0, 1)
+			} else {
+				countStyle = lipgloss.NewStyle().
+					Background(ColorSuccessBg).
+					Foreground(ColorOnAccent).
+					Bold(true).
+					Padding(0, 1)
+			}
+		} else {
+			countStyle = lipgloss.NewStyle().
+				Background(ColorBadgeBg).
+				Foreground(ColorMuted).
+				Padding(0, 1)
+		}
+		rightParts = append(rightParts, countStyle.Render(countText))
+	}
 
-		clearStyle := lipgloss.NewStyle().
+	if hasFilter {
+		clearBtnStr = lipgloss.NewStyle().
 			Background(ColorDangerBg).
 			Foreground(ColorOnAccent).
 			Bold(true).
-			Padding(0, 1)
-		rightParts = append(rightParts, clearStyle.Render("✖ Clear [Esc]"))
-	} else {
-		if m.Width >= 100 {
-			if m.IsFocused {
-				rightParts = append(rightParts, lipgloss.NewStyle().
-					Foreground(ColorWarning).
-					Background(bgColor).
-					MarginRight(1).
-					MarginBackground(bgColor).
-					Render("[Enter/Esc to exit]"))
-			} else {
-				rightParts = append(rightParts, lipgloss.NewStyle().
-					Foreground(ColorTextDim).
-					Background(bgColor).
-					MarginRight(1).
-					MarginBackground(bgColor).
-					Render("[Press '/' to filter]"))
-			}
+			Render("[× Clear]")
+		clearBtnW = lipgloss.Width(clearBtnStr)
+		if len(rightParts) > 0 {
+			rightParts = append(rightParts, lipgloss.NewStyle().Background(bgColor).Render(" "))
 		}
-		badgeStyle := lipgloss.NewStyle().
-			Background(ColorBadgeBg).
-			Foreground(ColorActive).
-			Bold(true).
-			Padding(0, 1)
-		rightParts = append(rightParts, badgeStyle.Render(fmt.Sprintf("All (%d)", m.TotalCount)))
+		rightParts = append(rightParts, clearBtnStr)
+		showClear = true
 	}
 
-	rightContent := lipgloss.JoinHorizontal(lipgloss.Center, rightParts...)
-	rightLen := lipgloss.Width(rightContent)
+	rightContent := strings.Join(rightParts, "")
+	rightW := lipgloss.Width(rightContent)
 
-	promptLen := 14
-	availInput := m.Width - rightLen - promptLen - 6
-	if availInput < 10 {
-		availInput = 10
+	// Guard against narrow widths where right cluster alone crowds out the prompt.
+	if rightW > innerW-4 {
+		if showClear && clearBtnW <= innerW-4 {
+			rightContent = clearBtnStr
+			rightW = clearBtnW
+		} else {
+			rightContent = ""
+			rightW = 0
+			showClear = false
+		}
+	}
+
+	// Build optional quick-filter chips on wide terminals when filter is empty and unfocused.
+	type renderedChip struct {
+		label    string
+		rendered string
+		width    int
+	}
+	var chips []renderedChip
+	chipsBlock := ""
+	chipsW := 0
+	chipsRightGapW := 0
+
+	if m.Width >= 115 && !hasFilter && !m.IsFocused {
+		chipStyle := lipgloss.NewStyle().
+			Background(ColorBadgeBg).
+			Foreground(ColorMuted).
+			Padding(0, 1)
+		gapStr := lipgloss.NewStyle().Background(bgColor).Render(" ")
+
+		var chipPieces []string
+		totalChipsW := 0
+		for i, lbl := range defaultQuickFilterChips {
+			rc := chipStyle.Render(lbl)
+			w := lipgloss.Width(rc)
+			chips = append(chips, renderedChip{label: lbl, rendered: rc, width: w})
+			if i > 0 {
+				chipPieces = append(chipPieces, gapStr)
+				totalChipsW++
+			}
+			chipPieces = append(chipPieces, rc)
+			totalChipsW += w
+		}
+
+		gapToRight := 0
+		if rightW > 0 {
+			gapToRight = 2
+		}
+		// Ensure plenty of room for the "/ Filter path..." input on the left.
+		const minLeftWithChips = 46
+		if minLeftWithChips+2+totalChipsW+gapToRight+rightW <= innerW {
+			chipsBlock = strings.Join(chipPieces, "")
+			chipsW = totalChipsW
+			chipsRightGapW = gapToRight
+		} else {
+			chips = nil
+		}
+	}
+
+	// Budget left textinput width.
+	rightSideTotalW := chipsW + chipsRightGapW + rightW
+	leftToRightGap := 0
+	if rightSideTotalW > 0 {
+		leftToRightGap = 1
+	}
+	maxLeftW := innerW - rightSideTotalW - leftToRightGap
+	if maxLeftW < 4 {
+		maxLeftW = 4
+	}
+
+	promptW := lipgloss.Width(m.TextInput.Prompt)
+	availInput := maxLeftW - promptW - 1
+	if availInput < 4 {
+		availInput = 4
 	}
 	m.TextInput.Width = availInput
 
 	leftContent := m.TextInput.View()
-	leftLen := lipgloss.Width(leftContent)
-
-	innerW := m.Width - 2
-	if innerW < 1 {
-		innerW = 1
+	leftW := lipgloss.Width(leftContent)
+	if leftW > maxLeftW {
+		leftContent = PaintBarLine(leftContent, maxLeftW, bgColor, ColorText)
+		leftW = maxLeftW
 	}
 
-	availSpace := innerW - leftLen - rightLen
-	if availSpace < 0 {
-		availSpace = 0
+	spacerW := innerW - leftW - rightSideTotalW
+	if spacerW < 0 {
+		spacerW = 0
 	}
-	spacer := lipgloss.NewStyle().Background(bgColor).Foreground(ColorText).Render(strings.Repeat(" ", availSpace))
+	spacer := lipgloss.NewStyle().Background(bgColor).Render(strings.Repeat(" ", spacerW))
+	pad := lipgloss.NewStyle().Background(bgColor).Render(" ")
 
-	barContent := lipgloss.JoinHorizontal(lipgloss.Center, leftContent, spacer, rightContent)
-	paintedBar := PaintBarLine(barContent, innerW, bgColor, ColorText)
+	var middle strings.Builder
+	middle.WriteString(pad)
+	middle.WriteString(leftContent)
+	middle.WriteString(spacer)
 
-	return containerStyle.Render(paintedBar)
+	var hitChips []HitChip
+	if len(chips) > 0 {
+		cursorX := 1 + leftW + spacerW
+		for i, c := range chips {
+			if i > 0 {
+				cursorX++
+			}
+			hitChips = append(hitChips, HitChip{
+				Label:  c.label,
+				StartX: cursorX,
+				EndX:   cursorX + c.width,
+			})
+			cursorX += c.width
+		}
+		middle.WriteString(chipsBlock)
+		if chipsRightGapW > 0 {
+			middle.WriteString(lipgloss.NewStyle().Background(bgColor).Render(strings.Repeat(" ", chipsRightGapW)))
+		}
+	}
+	middle.WriteString(rightContent)
+	middle.WriteString(pad)
+
+	fullLine := PaintBarLine(middle.String(), m.Width, bgColor, ColorText)
+
+	clearStartX, clearEndX := -1, -1
+	if showClear {
+		// Clear button is the rightmost element inside innerW.
+		clearEndX = 1 + leftW + spacerW + chipsW + chipsRightGapW + rightW
+		if clearEndX > m.Width-1 {
+			clearEndX = m.Width - 1
+		}
+		clearStartX = clearEndX - clearBtnW
+		if clearStartX < 0 {
+			clearStartX = -1
+			clearEndX = -1
+		}
+	}
+
+	return filterBarLayout{
+		line:        fullLine,
+		chips:       hitChips,
+		clearStartX: clearStartX,
+		clearEndX:   clearEndX,
+	}
+}
+
+// QuickChipHitRanges returns the exact rendered horizontal column ranges [StartX, EndX)
+// of visible quick-filter chips, or nil when chips are not displayed.
+func (m FilterBarModel) QuickChipHitRanges() []HitChip {
+	return m.computeLayout().chips
+}
+
+// ClearHitRange returns the exact rendered horizontal column range [startX, endX)
+// of the explicit [× Clear] button, or (-1, -1) when the filter is empty or hidden.
+func (m FilterBarModel) ClearHitRange() (startX, endX int) {
+	l := m.computeLayout()
+	return l.clearStartX, l.clearEndX
+}
+
+// View renders the 1-row borderless search and filter bar.
+func (m FilterBarModel) View() string {
+	return m.computeLayout().line
 }

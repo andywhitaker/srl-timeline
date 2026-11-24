@@ -32,6 +32,8 @@ type Theme struct {
 	Success         lipgloss.Color
 	SuccessBg       lipgloss.Color
 	Warning         lipgloss.Color
+	WarningBg       lipgloss.Color
+	OnWarning       lipgloss.Color
 	Danger          lipgloss.Color
 	DangerBg        lipgloss.Color
 	Muted           lipgloss.Color
@@ -68,6 +70,8 @@ var builtinThemes = []Theme{
 		Success:         lipgloss.Color("#3fb950"),
 		SuccessBg:       lipgloss.Color("#238636"),
 		Warning:         lipgloss.Color("#d29922"),
+		WarningBg:       lipgloss.Color("#d29922"),
+		OnWarning:       lipgloss.Color("#0d1117"),
 		Danger:          lipgloss.Color("#f85149"),
 		DangerBg:        lipgloss.Color("#da3633"),
 		Muted:           lipgloss.Color("#8b949e"),
@@ -102,6 +106,8 @@ var builtinThemes = []Theme{
 		Success:         lipgloss.Color("#3ad900"),
 		SuccessBg:       lipgloss.Color("#1d7a00"),
 		Warning:         lipgloss.Color("#ff9d00"),
+		WarningBg:       lipgloss.Color("#ff9d00"),
+		OnWarning:       lipgloss.Color("#122738"),
 		Danger:          lipgloss.Color("#ff628c"),
 		DangerBg:        lipgloss.Color("#c72c48"),
 		Muted:           lipgloss.Color("#8095a8"),
@@ -136,6 +142,8 @@ var builtinThemes = []Theme{
 		Success:         lipgloss.Color("#a6e22e"),
 		SuccessBg:       lipgloss.Color("#4d7012"),
 		Warning:         lipgloss.Color("#fd971f"),
+		WarningBg:       lipgloss.Color("#fd971f"),
+		OnWarning:       lipgloss.Color("#1e1f1c"),
 		Danger:          lipgloss.Color("#f92672"),
 		DangerBg:        lipgloss.Color("#b0154b"),
 		Muted:           lipgloss.Color("#908c77"),
@@ -170,6 +178,8 @@ var builtinThemes = []Theme{
 		Success:         lipgloss.Color("#859900"),
 		SuccessBg:       lipgloss.Color("#4d6b00"),
 		Warning:         lipgloss.Color("#b58900"),
+		WarningBg:       lipgloss.Color("#c99a00"),
+		OnWarning:       lipgloss.Color("#001a22"),
 		Danger:          lipgloss.Color("#dc322f"),
 		DangerBg:        lipgloss.Color("#a8201d"),
 		Muted:           lipgloss.Color("#839496"),
@@ -204,6 +214,8 @@ var builtinThemes = []Theme{
 		Success:         lipgloss.Color("#50fa7b"),
 		SuccessBg:       lipgloss.Color("#267d3d"),
 		Warning:         lipgloss.Color("#ffb86c"),
+		WarningBg:       lipgloss.Color("#ffb86c"),
+		OnWarning:       lipgloss.Color("#191a21"),
 		Danger:          lipgloss.Color("#ff5555"),
 		DangerBg:        lipgloss.Color("#b82c2c"),
 		Muted:           lipgloss.Color("#92a1cf"),
@@ -238,6 +250,8 @@ var builtinThemes = []Theme{
 		Success:         lipgloss.Color("#a3be8c"),
 		SuccessBg:       lipgloss.Color("#4f6b3e"),
 		Warning:         lipgloss.Color("#ebcb8b"),
+		WarningBg:       lipgloss.Color("#ebcb8b"),
+		OnWarning:       lipgloss.Color("#242933"),
 		Danger:          lipgloss.Color("#bf616a"),
 		DangerBg:        lipgloss.Color("#943d46"),
 		Muted:           lipgloss.Color("#a5b1c2"),
@@ -272,6 +286,8 @@ var builtinThemes = []Theme{
 		Success:         lipgloss.Color("#a6e3a1"),
 		SuccessBg:       lipgloss.Color("#357a38"),
 		Warning:         lipgloss.Color("#f9e2af"),
+		WarningBg:       lipgloss.Color("#f9e2af"),
+		OnWarning:       lipgloss.Color("#11111b"),
 		Danger:          lipgloss.Color("#f38ba8"),
 		DangerBg:        lipgloss.Color("#b5385a"),
 		Muted:           lipgloss.Color("#a6adc8"),
@@ -306,6 +322,8 @@ var builtinThemes = []Theme{
 		Success:         lipgloss.Color("#9ece6a"),
 		SuccessBg:       lipgloss.Color("#3b6e28"),
 		Warning:         lipgloss.Color("#e0af68"),
+		WarningBg:       lipgloss.Color("#e0af68"),
+		OnWarning:       lipgloss.Color("#16161e"),
 		Danger:          lipgloss.Color("#f7768e"),
 		DangerBg:        lipgloss.Color("#b83952"),
 		Muted:           lipgloss.Color("#7982a9"),
@@ -340,6 +358,8 @@ var builtinThemes = []Theme{
 		Success:         lipgloss.Color("#b8bb26"),
 		SuccessBg:       lipgloss.Color("#687016"),
 		Warning:         lipgloss.Color("#fabd2f"),
+		WarningBg:       lipgloss.Color("#fabd2f"),
+		OnWarning:       lipgloss.Color("#1d2021"),
 		Danger:          lipgloss.Color("#fb4934"),
 		DangerBg:        lipgloss.Color("#9d0006"),
 		Muted:           lipgloss.Color("#a89984"),
@@ -374,6 +394,8 @@ var builtinThemes = []Theme{
 		Success:         lipgloss.Color("#1a7f37"),
 		SuccessBg:       lipgloss.Color("#1a7f37"),
 		Warning:         lipgloss.Color("#9a6700"),
+		WarningBg:       lipgloss.Color("#8a5a00"),
+		OnWarning:       lipgloss.Color("#ffffff"),
 		Danger:          lipgloss.Color("#cf222e"),
 		DangerBg:        lipgloss.Color("#cf222e"),
 		Muted:           lipgloss.Color("#57606a"),
@@ -408,6 +430,8 @@ var builtinThemes = []Theme{
 		Success:         lipgloss.Color("#5f6e00"),
 		SuccessBg:       lipgloss.Color("#5f6e00"),
 		Warning:         lipgloss.Color("#b58900"),
+		WarningBg:       lipgloss.Color("#d4a216"),
+		OnWarning:       lipgloss.Color("#001a22"),
 		Danger:          lipgloss.Color("#dc322f"),
 		DangerBg:        lipgloss.Color("#b82523"),
 		Muted:           lipgloss.Color("#586e75"),
@@ -444,6 +468,8 @@ var (
 	ColorSuccess      lipgloss.Color
 	ColorSuccessBg    lipgloss.Color
 	ColorWarning      lipgloss.Color
+	ColorWarningBg    lipgloss.Color
+	ColorOnWarning    lipgloss.Color
 	ColorDanger       lipgloss.Color
 	ColorDangerBg     lipgloss.Color
 	ColorMuted        lipgloss.Color
@@ -507,6 +533,8 @@ func applyModalTheme(t Theme) {
 	ColorSuccess = t.Success
 	ColorSuccessBg = t.SuccessBg
 	ColorWarning = t.Warning
+	ColorWarningBg = t.WarningBg
+	ColorOnWarning = t.OnWarning
 	ColorDanger = t.Danger
 	ColorDangerBg = t.DangerBg
 	ColorMuted = t.Muted

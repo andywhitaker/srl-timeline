@@ -1,14 +1,36 @@
 package tui
 
 import (
+	"strings"
 	"timeline/pkg/tui/modals"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/ansi"
+	"github.com/muesli/reflow/truncate"
 )
 
 // Theme defines a complete semantic color palette for the TUI.
 type Theme = modals.Theme
+
+// Deterministic single-width geometric Unicode glyphs (no emoji width ambiguity).
+const (
+	GlyphLive        = "●"
+	GlyphSelected    = "◉"
+	GlyphPaused      = "○"
+	GlyphMilestone   = "◆"
+	GlyphEmpty       = "◌"
+	GlyphPipe        = "│"
+	GlyphBar         = "▎"
+	GlyphCollapsed   = "▸"
+	GlyphExpanded    = "▾"
+	GlyphCheck       = "✓"
+	GlyphCross       = "✕"
+	GlyphUp          = "↑"
+	GlyphDown        = "↓"
+	GlyphScrollThumb = "█"
+	GlyphScrollTrack = "░"
+)
 
 var (
 	// Core Palette
@@ -23,6 +45,8 @@ var (
 	ColorSuccess      lipgloss.Color
 	ColorSuccessBg    lipgloss.Color
 	ColorWarning      lipgloss.Color
+	ColorWarningBg    lipgloss.Color
+	ColorOnWarning    lipgloss.Color
 	ColorDanger       lipgloss.Color
 	ColorDangerBg     lipgloss.Color
 	ColorMuted        lipgloss.Color
@@ -131,6 +155,8 @@ func applyThemeStyles(t Theme) {
 	ColorSuccess = t.Success
 	ColorSuccessBg = t.SuccessBg
 	ColorWarning = t.Warning
+	ColorWarningBg = t.WarningBg
+	ColorOnWarning = t.OnWarning
 	ColorDanger = t.Danger
 	ColorDangerBg = t.DangerBg
 	ColorMuted = t.Muted
@@ -156,76 +182,46 @@ func applyThemeStyles(t Theme) {
 	StyleHeaderContainer = lipgloss.NewStyle().
 		Background(ColorSurface).
 		Foreground(ColorText).
-		BorderBottom(true).
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderBottomForeground(ColorBorder).
-		BorderBottomBackground(ColorSurface).
 		Padding(0, 1)
 
 	StyleAppTitle = lipgloss.NewStyle().
 		Bold(true).
-		Foreground(ColorOnAccent).
-		Background(ColorPrimary).
-		Padding(0, 1).
-		MarginRight(1).
-		MarginBackground(ColorSurface)
+		Foreground(ColorActive).
+		Background(ColorSurface)
 	StyleHeaderApp = StyleAppTitle
 
 	StyleBadgeDevice = lipgloss.NewStyle().
-		Background(ColorBadgeBg).
+		Background(ColorSurface).
 		Foreground(ColorCyan).
-		Bold(true).
-		Padding(0, 1).
-		MarginRight(1).
-		MarginBackground(ColorSurface)
+		Bold(true)
 	StyleHeaderTarget = StyleBadgeDevice
 
 	StyleBadgeVersion = lipgloss.NewStyle().
-		Background(ColorBadgeBg).
-		Foreground(ColorMuted).
-		Padding(0, 1).
-		MarginRight(1).
-		MarginBackground(ColorSurface)
+		Background(ColorSurface).
+		Foreground(ColorMuted)
 
 	StyleBadgeActive = lipgloss.NewStyle().
-		Background(ColorSuccessBg).
-		Foreground(ColorOnAccent).
-		Bold(true).
-		Padding(0, 1).
-		MarginRight(1).
-		MarginBackground(ColorSurface)
+		Background(ColorSurface).
+		Foreground(ColorSuccess).
+		Bold(true)
 	StyleHeaderDaemonRun = StyleBadgeActive
 
 	StyleHeaderDaemonStop = lipgloss.NewStyle().
-		Background(ColorMuted).
-		Foreground(ColorOnAccent).
-		Bold(true).
-		Padding(0, 1).
-		MarginRight(1).
-		MarginBackground(ColorSurface)
+		Background(ColorSurface).
+		Foreground(ColorTextDim)
 
 	StyleBadgeSync = lipgloss.NewStyle().
-		Background(ColorBadgeBg).
-		Foreground(ColorActive).
-		Bold(true).
-		Padding(0, 1)
+		Background(ColorSurface).
+		Foreground(ColorMuted)
 
 	StyleFilterContainer = lipgloss.NewStyle().
 		Background(ColorSurface).
 		Foreground(ColorText).
-		BorderBottom(true).
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderBottomForeground(ColorBorder).
-		BorderBottomBackground(ColorSurface).
 		Padding(0, 1)
 
 	StyleFilterContainerFocused = lipgloss.NewStyle().
 		Background(ColorSurfaceFocus).
 		Foreground(ColorText).
-		BorderBottom(true).
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderBottomForeground(ColorActive).
-		BorderBottomBackground(ColorSurfaceFocus).
 		Padding(0, 1)
 
 	StyleFilterLabel = lipgloss.NewStyle().
@@ -361,10 +357,6 @@ func applyThemeStyles(t Theme) {
 	StyleFooterContainer = lipgloss.NewStyle().
 		Background(ColorSurface).
 		Foreground(ColorMuted).
-		BorderTop(true).
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderTopForeground(ColorBorder).
-		BorderTopBackground(ColorSurface).
 		Padding(0, 1)
 
 	StyleKeybindKey = lipgloss.NewStyle().
@@ -374,9 +366,7 @@ func applyThemeStyles(t Theme) {
 
 	StyleKeybindDesc = lipgloss.NewStyle().
 		Foreground(ColorMuted).
-		Background(ColorSurface).
-		MarginRight(2).
-		MarginBackground(ColorSurface)
+		Background(ColorSurface)
 
 	StyleModalBox = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -442,4 +432,154 @@ func PaintBarLine(line string, width int, bg, defaultFg lipgloss.Color) string {
 // PaintSurface paints a multi-line block to exact width and height with bg and defaultFg.
 func PaintSurface(block string, width, height int, bg, defaultFg lipgloss.Color) string {
 	return modals.PaintSurface(block, width, height, bg, defaultFg)
+}
+
+// RenderTitledBox renders a rounded-border box with an embedded top-border title
+// (`╭─ <title> ───╮`, `│`, `╰───╯`) and exact outer dimensions width x height.
+// Every row preserves full-bleed ANSI background recovery across all color themes.
+// Plain titles are rendered bold in ColorText on titleBg; pre-styled ANSI titles
+// preserve their styling while recovering titleBg across resets.
+func RenderTitledBox(title string, body string, width, height int, borderFg lipgloss.Color, titleBg, bodyBg lipgloss.Color) string {
+	if width <= 0 || height <= 0 {
+		return ""
+	}
+	if bodyBg == "" {
+		bodyBg = ColorBackground
+	}
+	if titleBg == "" {
+		titleBg = bodyBg
+	}
+	if borderFg == "" {
+		borderFg = ColorBorder
+	}
+
+	b := lipgloss.RoundedBorder()
+	borderStyle := lipgloss.NewStyle().Foreground(borderFg).Background(bodyBg)
+
+	if width == 1 {
+		return PaintSurface(strings.Repeat(b.Left+"\n", height-1)+b.Left, 1, height, bodyBg, borderFg)
+	}
+
+	// Build top border row: ╭─ <title> ─...─╮
+	cleanTitle := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(title, "\r", ""), "\n", " "))
+	var topRow string
+	if cleanTitle != "" && width >= 7 {
+		maxTitleW := width - 6 // ╭─ (2) + space (1) + title + space (1) + ─ (1+) + ╮ (1)
+		titleStr := cleanTitle
+		if ansi.PrintableRuneWidth(titleStr) > maxTitleW {
+			titleStr = truncate.String(titleStr, uint(maxTitleW))
+		}
+		hasANSI := strings.Contains(titleStr, "\x1b[")
+		if hasANSI && !strings.HasSuffix(titleStr, "\x1b[0m") {
+			titleStr += "\x1b[0m"
+		}
+		titleW := ansi.PrintableRuneWidth(titleStr)
+		fillW := width - 5 - titleW
+		if fillW < 1 {
+			fillW = 1
+		}
+
+		var titleSeg string
+		if hasANSI {
+			titleSeg = PaintBarLine(" "+titleStr+" ", titleW+2, titleBg, ColorText)
+		} else {
+			titleSeg = lipgloss.NewStyle().Bold(true).Foreground(ColorText).Background(titleBg).Render(" " + titleStr + " ")
+		}
+
+		leftCorner := borderStyle.Render(b.TopLeft + b.Top)
+		rightEdge := borderStyle.Render(strings.Repeat(b.Top, fillW) + b.TopRight)
+		topRow = PaintBarLine(leftCorner+titleSeg+rightEdge, width, bodyBg, borderFg)
+	} else {
+		topRow = PaintBarLine(b.TopLeft+strings.Repeat(b.Top, width-2)+b.TopRight, width, bodyBg, borderFg)
+	}
+
+	if height == 1 {
+		return topRow
+	}
+
+	rows := make([]string, 0, height)
+	rows = append(rows, topRow)
+
+	innerH := height - 2
+	innerW := width - 2
+	if innerH > 0 {
+		leftBar := borderStyle.Render(b.Left)
+		rightBar := borderStyle.Render(b.Right)
+		if innerW > 0 {
+			paintedBody := PaintSurface(body, innerW, innerH, bodyBg, ColorText)
+			for _, line := range strings.Split(paintedBody, "\n") {
+				rows = append(rows, leftBar+line+rightBar)
+			}
+		} else {
+			for i := 0; i < innerH; i++ {
+				rows = append(rows, leftBar+rightBar)
+			}
+		}
+	}
+
+	bottomRow := PaintBarLine(b.BottomLeft+strings.Repeat(b.Bottom, width-2)+b.BottomRight, width, bodyBg, borderFg)
+	rows = append(rows, bottomRow)
+
+	return strings.Join(rows, "\n")
+}
+
+// RenderScrollbar returns a height-element slice of 1-column-wide styled scrollbar cells
+// using █ (thumb) and ░ (track) painted on bg. When totalLines <= height, returns
+// blank cells painted on bg so short viewports stay visually quiet.
+func RenderScrollbar(height, totalLines, yOffset int, bg lipgloss.Color) []string {
+	if height <= 0 {
+		return nil
+	}
+	if bg == "" {
+		bg = ColorPanel
+	}
+
+	cells := make([]string, height)
+	if totalLines <= height {
+		blank := lipgloss.NewStyle().Background(bg).Foreground(ColorBorder).Render(" ")
+		for i := range cells {
+			cells[i] = blank
+		}
+		return cells
+	}
+
+	thumbH := (height*height + totalLines/2) / totalLines
+	if thumbH < 1 {
+		thumbH = 1
+	}
+	if thumbH > height {
+		thumbH = height
+	}
+
+	maxOffset := totalLines - height
+	if yOffset < 0 {
+		yOffset = 0
+	}
+	if yOffset > maxOffset {
+		yOffset = maxOffset
+	}
+
+	trackRange := height - thumbH
+	thumbStart := 0
+	if maxOffset > 0 && trackRange > 0 {
+		thumbStart = (yOffset*trackRange + maxOffset/2) / maxOffset
+		if thumbStart < 0 {
+			thumbStart = 0
+		}
+		if thumbStart > trackRange {
+			thumbStart = trackRange
+		}
+	}
+
+	thumbCell := lipgloss.NewStyle().Foreground(ColorActive).Background(bg).Render(GlyphScrollThumb)
+	trackCell := lipgloss.NewStyle().Foreground(ColorBorder).Background(bg).Render(GlyphScrollTrack)
+
+	for i := 0; i < height; i++ {
+		if i >= thumbStart && i < thumbStart+thumbH {
+			cells[i] = thumbCell
+		} else {
+			cells[i] = trackCell
+		}
+	}
+	return cells
 }
