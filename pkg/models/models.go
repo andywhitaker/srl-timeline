@@ -58,19 +58,20 @@ func (d SemanticDiffResult) StatBadge() string {
 
 // TimelineCommit represents a single configuration commit in the repository.
 type TimelineCommit struct {
-	CommitID    string                 `json:"commit_id"`
-	FullSHA     string                 `json:"full_sha"`
-	Timestamp   time.Time              `json:"timestamp"`
-	Author      string                 `json:"author"`
-	Message     string                 `json:"message"`
-	SRLCommitID string                 `json:"srl_commit_id,omitempty"`
-	SessionID   string                 `json:"session_id,omitempty"`
-	DiffStat    string                 `json:"diff_stat"`
-	IsCurrent   bool                   `json:"is_current"`
-	IsStartup   bool                   `json:"is_startup"`
-	IsRestored  bool                   `json:"is_restored"`
-	Tags        []string               `json:"tags,omitempty"`
-	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+	CommitID     string                 `json:"commit_id"`
+	FullSHA      string                 `json:"full_sha"`
+	Timestamp    time.Time              `json:"timestamp"`
+	Author       string                 `json:"author"`
+	Message      string                 `json:"message"`
+	SRLCommitID  string                 `json:"srl_commit_id,omitempty"`
+	SessionID    string                 `json:"session_id,omitempty"`
+	DiffStat     string                 `json:"diff_stat"`
+	SummaryScope string                 `json:"summary_scope,omitempty"`
+	IsCurrent    bool                   `json:"is_current"`
+	IsStartup    bool                   `json:"is_startup"`
+	IsRestored   bool                   `json:"is_restored"`
+	Tags         []string               `json:"tags,omitempty"`
+	Metadata     map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // RelativeTime returns human-friendly relative time string (e.g. "2m ago", "1h ago").
