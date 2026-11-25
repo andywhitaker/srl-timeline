@@ -175,31 +175,7 @@ func (m *DiffViewModel) UpdateContent() {
 		} else {
 			digits := gutterDigitsForCount(len(filtered))
 			for idx, c := range filtered {
-				lineNo := idx + 1
-				var badge string
-				var pathFg lipgloss.Color
-				switch c.DiffType {
-				case models.DiffAdded:
-					badge = lipgloss.NewStyle().Background(ColorSuccessBg).Foreground(ColorOnAccent).Bold(true).Render(" ADD ")
-					pathFg = ColorSuccess
-				case models.DiffModified:
-					badge = lipgloss.NewStyle().Background(ColorWarningBg).Foreground(ColorOnWarning).Bold(true).Render(" MOD ")
-					pathFg = ColorText
-				case models.DiffDeleted:
-					badge = lipgloss.NewStyle().Background(ColorDangerBg).Foreground(ColorOnAccent).Bold(true).Render(" DEL ")
-					pathFg = ColorDanger
-				default:
-					badge = lipgloss.NewStyle().Background(ColorBadgeBg).Foreground(ColorMuted).Render(" CHG ")
-					pathFg = ColorText
-				}
-
-				pathStyled := lipgloss.NewStyle().Bold(true).Foreground(pathFg).Background(ColorPanel).Render(c.Path)
-				valSuffix := formatPathChangeValue(c, ColorPanel)
-				entryStr := badge + lipgloss.NewStyle().Background(ColorPanel).Render(" ") + pathStyled
-				if valSuffix != "" {
-					entryStr += lipgloss.NewStyle().Background(ColorPanel).Render("  ") + valSuffix
-				}
-				outLines = append(outLines, formatGutteredWrappedLines(lineNo, digits, entryStr, wrapW, ColorPanel, pathFg)...)
+				outLines = append(outLines, formatPathChangeLines(idx+1, digits, c, wrapW)...)
 			}
 		}
 
@@ -375,7 +351,10 @@ type toolbarPillSpec struct {
 	fixedPad bool
 }
 
-func buildToolbarLine(specs []toolbarPillSpec, focused bool, rightStatus string, innerW int) (string, []HitChip) {
+const compactToolbarThreshold = 54
+const tightToolbarPadThreshold = 40
+
+func buildToolbarLine(specs []toolbarPillSpec, focused bool, rightStatus, rightFallback string, innerW int) (string, []HitChip) {
 	if innerW < 1 {
 		innerW = 1
 	}
@@ -398,14 +377,11 @@ func buildToolbarLine(specs []toolbarPillSpec, focused bool, rightStatus string,
 		st := lipgloss.NewStyle().Padding(0, padH)
 		switch {
 		case spec.warning && spec.active:
-			st = st.Background(ColorWarningBg).Foreground(ColorOnWarning)
-			if focused {
-				st = st.Bold(true)
-			}
+			st = st.Background(ColorWarningBg).Foreground(ColorOnWarning).Bold(true)
 		case spec.active && focused:
 			st = st.Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true)
 		case spec.active && !focused:
-			st = st.Background(ColorBadgeBg).Foreground(ColorTextDim).Bold(true)
+			st = st.Background(ColorBadgeBg).Foreground(ColorText).Bold(true).Underline(true)
 		case !focused:
 			st = st.Background(ColorSurface).Foreground(ColorTextDim)
 		default:
@@ -429,35 +405,61 @@ func buildToolbarLine(specs []toolbarPillSpec, focused bool, rightStatus string,
 		cursorX += w
 	}
 
+	chosenRight := ""
 	if rightStatus != "" {
-		rightW := lipgloss.Width(rightStatus)
-		gap := innerW - cursorX - rightW - 1
-		if gap >= 1 {
-			b.WriteString(lipgloss.NewStyle().Background(ColorSurface).Render(strings.Repeat(" ", gap)))
-			b.WriteString(rightStatus)
+		if gap := innerW - cursorX - lipgloss.Width(rightStatus) - 1; gap >= 1 {
+			chosenRight = rightStatus
 		}
+	}
+	if chosenRight == "" && rightFallback != "" {
+		if gap := innerW - cursorX - lipgloss.Width(rightFallback) - 1; gap >= 1 {
+			chosenRight = rightFallback
+		}
+	}
+	if chosenRight != "" {
+		gap := innerW - cursorX - lipgloss.Width(chosenRight) - 1
+		b.WriteString(lipgloss.NewStyle().Background(ColorSurface).Render(strings.Repeat(" ", gap)))
+		b.WriteString(chosenRight)
 	}
 
 	return PaintBarLine(b.String(), innerW, ColorSurface, ColorText), chips
 }
 
 func (m DiffViewModel) buildToolbar(innerW int) (string, []HitChip) {
-	liveText := "[4] Live"
-	livePad := 1
-	if m.VsLive {
-		liveText = GlyphLive + " Live"
-		livePad = 2 // exact same total width (10 cols) as "[4] Live" with pad 1!
+	compact := innerW < compactToolbarThreshold
+	var specs []toolbarPillSpec
+	if compact {
+		padH := 1
+		if innerW < tightToolbarPadThreshold {
+			padH = 0
+		}
+		liveText := "4:Live"
+		if m.VsLive {
+			liveText = GlyphLive + " Live" // exact same 6-col width as "4:Live"
+		}
+		specs = []toolbarPillSpec{
+			{label: "unified", text: "1:Uni", active: m.DiffMode == "unified", padH: padH, fixedPad: true},
+			{label: "path", text: "2:Path", active: m.DiffMode == "path", padH: padH, fixedPad: true},
+			{label: "cli", text: "3:CLI", active: m.DiffMode == "cli" || m.DiffMode == "", padH: padH, fixedPad: true},
+			{label: "live", text: liveText, active: m.VsLive, warning: true, padH: padH, fixedPad: true},
+		}
+	} else {
+		liveText := "[4] Live"
+		livePad := 1
+		if m.VsLive {
+			liveText = GlyphLive + " Live"
+			livePad = 2 // exact same total width (10 cols) as "[4] Live" with pad 1!
+		}
+		specs = []toolbarPillSpec{
+			{label: "unified", text: "[1] Unified", active: m.DiffMode == "unified", padH: 1},
+			{label: "path", text: "[2] Path", active: m.DiffMode == "path", padH: 1},
+			{label: "cli", text: "[3] CLI", active: m.DiffMode == "cli" || m.DiffMode == "", padH: 1},
+			{label: "live", text: liveText, active: m.VsLive, warning: true, padH: livePad, fixedPad: true},
+		}
 	}
 
-	specs := []toolbarPillSpec{
-		{label: "unified", text: "[1] Unified", active: m.DiffMode == "unified", padH: 1},
-		{label: "path", text: "[2] Path", active: m.DiffMode == "path", padH: 1},
-		{label: "cli", text: "[3] CLI", active: m.DiffMode == "cli" || m.DiffMode == "", padH: 1},
-		{label: "live", text: liveText, active: m.VsLive, warning: true, padH: livePad, fixedPad: true},
-	}
-
-	scrollBadge := renderCompactScrollStatus(m.Viewport)
-	return buildToolbarLine(specs, m.IsFocused, scrollBadge, innerW)
+	scrollPrimary, scrollFallback := renderToolbarScrollStatuses(m.Viewport, compact)
+	return buildToolbarLine(specs, m.IsFocused, scrollPrimary, scrollFallback, innerW)
 }
 
 // ControlHitRanges returns clickable toolbar pill hit ranges relative to the inner pane X=0.
@@ -486,7 +488,7 @@ func (m DiffViewModel) View() string {
 	sections = append(sections, controlsBar)
 
 	if m.hasContextStrip() {
-		sections = append(sections, renderCommitContextStrip(m.Commit, m.BaseCommit, m.VsLive, innerW))
+		sections = append(sections, renderCommitContextStrip(m.Commit, m.BaseCommit, m.VsLive, &m.DiffResult, innerW))
 	}
 
 	vpH := innerH - len(sections)
@@ -539,7 +541,7 @@ func buildDetailTabLayout(activeTab int, focused, zoomed bool, outerW int) (stri
 	if focused {
 		activeStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorOnAccent).Background(ColorPrimary)
 	} else {
-		activeStyle = lipgloss.NewStyle().Foreground(ColorTextDim).Background(ColorBadgeBg)
+		activeStyle = lipgloss.NewStyle().Bold(true).Underline(true).Foreground(ColorText).Background(ColorBadgeBg)
 	}
 	inactiveFg := ColorMuted
 	if !focused {
@@ -622,8 +624,43 @@ func DetailTabHitRanges(outerW int, zoomed bool) []HitChip {
 	return chips
 }
 
+// formatComparisonStatTokens computes and styles actual +A ~M -D leaf totals from diffRes
+// for A↔B comparison and VsLive modes.
+func formatComparisonStatTokens(diffRes models.SemanticDiffResult, bg lipgloss.Color) string {
+	added, modified, deleted := diffRes.AddedCount, diffRes.ModifiedCount, diffRes.DeletedCount
+	if added == 0 && modified == 0 && deleted == 0 && len(diffRes.Changes) > 0 {
+		for _, c := range filterRedundantPathChanges(diffRes.Changes) {
+			switch c.DiffType {
+			case models.DiffAdded:
+				added++
+			case models.DiffModified:
+				modified++
+			case models.DiffDeleted:
+				deleted++
+			}
+		}
+	}
+	var parts []string
+	if added > 0 {
+		parts = append(parts, fmt.Sprintf("+%d", added))
+	}
+	if modified > 0 {
+		parts = append(parts, fmt.Sprintf("~%d", modified))
+	}
+	if deleted > 0 {
+		parts = append(parts, fmt.Sprintf("-%d", deleted))
+	}
+	if len(parts) > 0 {
+		return formatDiffStatTokens(strings.Join(parts, " "), bg)
+	}
+	if !diffRes.HasChanges {
+		return lipgloss.NewStyle().Foreground(ColorSuccess).Background(bg).Render(GlyphCheck + " Identical")
+	}
+	return ""
+}
+
 // renderCommitContextStrip renders a compact 1-row metadata summary strip below the Detail toolbar.
-func renderCommitContextStrip(commit, baseCommit *models.TimelineCommit, vsLive bool, width int) string {
+func renderCommitContextStrip(commit, baseCommit *models.TimelineCommit, vsLive bool, diffRes *models.SemanticDiffResult, width int) string {
 	if width < 1 {
 		return ""
 	}
@@ -661,6 +698,11 @@ func renderCommitContextStrip(commit, baseCommit *models.TimelineCommit, vsLive 
 			Bold(true).
 			Render(" " + GlyphLive + " LIVE ")
 		appendPart("", shaStyle.Render(commit.CommitID)+arrow+liveBadge)
+		if diffRes != nil {
+			if stat := formatComparisonStatTokens(*diffRes, bg); stat != "" {
+				appendPart(sep, stat)
+			}
+		}
 		if commit.Author != "" {
 			appendPart(sep, lipgloss.NewStyle().Foreground(ColorMuted).Background(bg).Render(commit.Author))
 		}
@@ -674,11 +716,13 @@ func renderCommitContextStrip(commit, baseCommit *models.TimelineCommit, vsLive 
 			Bold(true).
 			Render(" BASE ")
 		appendPart("", baseBadge+sp+shaStyle.Render(baseCommit.CommitID)+arrow+shaStyle.Render(commit.CommitID))
+		if diffRes != nil {
+			if stat := formatComparisonStatTokens(*diffRes, bg); stat != "" {
+				appendPart(sep, stat)
+			}
+		}
 		if commit.Author != "" {
 			appendPart(sep, lipgloss.NewStyle().Foreground(ColorMuted).Background(bg).Render(commit.Author))
-		}
-		if stat := formatDiffStatTokens(commit.DiffStat, bg); stat != "" {
-			appendPart(sep, stat)
 		}
 	case commit != nil:
 		appendPart("", shaStyle.Render(commit.CommitID))
@@ -707,30 +751,47 @@ func renderCommitContextStrip(commit, baseCommit *models.TimelineCommit, vsLive 
 	return PaintBarLine(sp+strings.Join(parts, ""), width, bg, ColorText)
 }
 
-func renderCompactScrollStatus(vp viewport.Model) string {
+func renderToolbarScrollStatuses(vp viewport.Model, compact bool) (string, string) {
 	total := vp.TotalLineCount()
 	if total <= 0 {
-		return ""
+		return "", ""
 	}
 	bot := vp.YOffset + vp.Height
 	if bot > total {
 		bot = total
 	}
-	var text string
+	pct := int(vp.ScrollPercent() * 100)
 	var fg lipgloss.Color
 	switch {
 	case vp.AtTop():
-		text = fmt.Sprintf("%s %d/%d", GlyphUp, bot, total)
 		fg = ColorMuted
 	case vp.AtBottom():
-		text = fmt.Sprintf("%s %d/%d", GlyphCheck, bot, total)
 		fg = ColorSuccess
 	default:
-		pct := int(vp.ScrollPercent() * 100)
-		text = fmt.Sprintf("%d%% %d/%d", pct, bot, total)
 		fg = ColorActive
 	}
-	return lipgloss.NewStyle().Foreground(fg).Background(ColorSurface).Render(text)
+	st := lipgloss.NewStyle().Foreground(fg).Background(ColorSurface)
+	shortRatio := st.Render(fmt.Sprintf("%d/%d", bot, total))
+	if compact {
+		pctOnly := st.Render(fmt.Sprintf("%d%%", pct))
+		return shortRatio, pctOnly
+	}
+
+	var fullText string
+	switch {
+	case vp.AtTop():
+		fullText = fmt.Sprintf("%s %d/%d", GlyphUp, bot, total)
+	case vp.AtBottom():
+		fullText = fmt.Sprintf("%s %d/%d", GlyphCheck, bot, total)
+	default:
+		fullText = fmt.Sprintf("%d%% %d/%d", pct, bot, total)
+	}
+	return st.Render(fullText), shortRatio
+}
+
+func renderCompactScrollStatus(vp viewport.Model) string {
+	primary, _ := renderToolbarScrollStatuses(vp, false)
+	return primary
 }
 
 // renderViewportWithScrollbar renders vp at exact innerW x vpH, placing a slim 1-col
@@ -847,6 +908,255 @@ func formatGutteredWrappedLines(lineNo, digits int, styledContent string, totalW
 		} else {
 			out = append(out, PaintBarLine(contGutter+cl, totalW, bg, defaultFg))
 		}
+	}
+	return out
+}
+
+// splitTopLevelXPathSegments splits an XPath on '/' boundaries outside [...] brackets,
+// keeping the leading '/' attached to each segment so wrapped continuation lines read cleanly.
+func splitTopLevelXPathSegments(path string) []string {
+	if path == "" {
+		return nil
+	}
+	var segs []string
+	segStart := 0
+	bracketDepth := 0
+	for i, r := range path {
+		switch r {
+		case '[':
+			bracketDepth++
+		case ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+		case '/':
+			if bracketDepth == 0 && i > segStart {
+				segs = append(segs, path[segStart:i])
+				segStart = i
+			}
+		}
+	}
+	if segStart < len(path) {
+		segs = append(segs, path[segStart:])
+	}
+	return segs
+}
+
+// splitBracketPredicates splits an oversize XPath segment on '[' boundaries
+// (e.g. "/acl-filter[name=uplink-in][type=ipv4]" -> ["/acl-filter", "[name=uplink-in]", "[type=ipv4]"]).
+func splitBracketPredicates(seg string) []string {
+	if seg == "" {
+		return nil
+	}
+	var parts []string
+	partStart := 0
+	for i, r := range seg {
+		if r == '[' && i > partStart {
+			parts = append(parts, seg[partStart:i])
+			partStart = i
+		}
+	}
+	if partStart < len(seg) {
+		parts = append(parts, seg[partStart:])
+	}
+	return parts
+}
+
+func wrapRunesByWidth(s string, maxW int) []string {
+	if maxW < 1 {
+		maxW = 1
+	}
+	if lipgloss.Width(s) <= maxW {
+		return []string{s}
+	}
+	var lines []string
+	var cur strings.Builder
+	curW := 0
+	for _, r := range s {
+		rs := string(r)
+		rw := lipgloss.Width(rs)
+		if curW > 0 && curW+rw > maxW {
+			lines = append(lines, cur.String())
+			cur.Reset()
+			curW = 0
+		}
+		cur.WriteRune(r)
+		curW += rw
+	}
+	if cur.Len() > 0 {
+		lines = append(lines, cur.String())
+	}
+	return lines
+}
+
+// wrapXPathSegments wraps an XPath into lines of at most maxW columns, breaking cleanly
+// on top-level '/' segment boundaries (and '[' predicate boundaries for oversize segments),
+// falling back to rune-width wrap only when a single atomic token exceeds maxW.
+func wrapXPathSegments(path string, maxW int) []string {
+	if maxW < 1 {
+		maxW = 1
+	}
+	if path == "" || lipgloss.Width(path) <= maxW {
+		return []string{path}
+	}
+
+	segments := splitTopLevelXPathSegments(path)
+	var lines []string
+	cur := ""
+	curW := 0
+
+	appendAtomic := func(tok string) {
+		tw := lipgloss.Width(tok)
+		if cur == "" {
+			if tw <= maxW {
+				cur = tok
+				curW = tw
+				return
+			}
+			chunks := wrapRunesByWidth(tok, maxW)
+			lines = append(lines, chunks[:len(chunks)-1]...)
+			cur = chunks[len(chunks)-1]
+			curW = lipgloss.Width(cur)
+			return
+		}
+		if curW+tw <= maxW {
+			cur += tok
+			curW += tw
+			return
+		}
+		lines = append(lines, cur)
+		if tw <= maxW {
+			cur = tok
+			curW = tw
+			return
+		}
+		chunks := wrapRunesByWidth(tok, maxW)
+		lines = append(lines, chunks[:len(chunks)-1]...)
+		cur = chunks[len(chunks)-1]
+		curW = lipgloss.Width(cur)
+	}
+
+	for _, seg := range segments {
+		sw := lipgloss.Width(seg)
+		if cur != "" && curW+sw <= maxW {
+			cur += seg
+			curW += sw
+			continue
+		}
+		if sw <= maxW {
+			if cur != "" {
+				lines = append(lines, cur)
+			}
+			cur = seg
+			curW = sw
+			continue
+		}
+		if cur != "" {
+			lines = append(lines, cur)
+			cur = ""
+			curW = 0
+		}
+		for _, part := range splitBracketPredicates(seg) {
+			appendAtomic(part)
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	return lines
+}
+
+// formatPathChangeLines renders a single structured PathChange with a line-number gutter,
+// keeping the ADD/MOD/DEL badge and the first XPath segment on the same line (never orphaned),
+// wrapping continuation segments on '/' boundaries with a clean hanging indent aligned to the path start.
+func formatPathChangeLines(lineNo, digits int, c models.PathChange, totalW int) []string {
+	var badge string
+	var pathFg lipgloss.Color
+	switch c.DiffType {
+	case models.DiffAdded:
+		badge = lipgloss.NewStyle().Background(ColorSuccessBg).Foreground(ColorOnAccent).Bold(true).Render(" ADD ")
+		pathFg = ColorSuccess
+	case models.DiffModified:
+		badge = lipgloss.NewStyle().Background(ColorWarningBg).Foreground(ColorOnWarning).Bold(true).Render(" MOD ")
+		pathFg = ColorText
+	case models.DiffDeleted:
+		badge = lipgloss.NewStyle().Background(ColorDangerBg).Foreground(ColorOnAccent).Bold(true).Render(" DEL ")
+		pathFg = ColorDanger
+	default:
+		badge = lipgloss.NewStyle().Background(ColorBadgeBg).Foreground(ColorMuted).Render(" CHG ")
+		pathFg = ColorText
+	}
+
+	bg := ColorPanel
+	sp := lipgloss.NewStyle().Background(bg).Render(" ")
+	badgePrefix := badge + sp
+	badgeBlockW := lipgloss.Width(badgePrefix) // 6 cols (" DEL  ")
+
+	var firstGutter, contGutter string
+	contentW := totalW
+	if totalW > digits+8 {
+		usePipe := totalW >= 36
+		gutterW := digits + 2
+		if usePipe {
+			gutterW = digits + 3
+		}
+		contentW = totalW - gutterW
+		if contentW < 4 {
+			contentW = 4
+		}
+		numStyle := lipgloss.NewStyle().Foreground(ColorTextDim).Background(bg)
+		pipeStyle := lipgloss.NewStyle().Foreground(ColorBorder).Background(bg)
+		if usePipe {
+			firstGutter = numStyle.Render(fmt.Sprintf("%*d", digits, lineNo)) + sp + pipeStyle.Render(GlyphPipe) + sp
+			contGutter = numStyle.Render(strings.Repeat(" ", digits)) + sp + pipeStyle.Render(GlyphPipe) + sp
+		} else {
+			firstGutter = numStyle.Render(fmt.Sprintf("%*d", digits, lineNo)) + lipgloss.NewStyle().Background(bg).Render("  ")
+			contGutter = lipgloss.NewStyle().Background(bg).Render(strings.Repeat(" ", gutterW))
+		}
+	}
+
+	availPathW := contentW - badgeBlockW
+	hangIndent := lipgloss.NewStyle().Background(bg).Render(strings.Repeat(" ", badgeBlockW))
+	if availPathW < 4 {
+		availPathW = 4
+		hangIndent = ""
+	}
+
+	pathStyle := lipgloss.NewStyle().Bold(true).Foreground(pathFg).Background(bg)
+	pathLines := wrapXPathSegments(c.Path, availPathW)
+	valSuffix := formatPathChangeValue(c, bg)
+
+	// Decide whether valSuffix fits cleanly on the final path line or wraps onto continuation line(s).
+	appendValInline := false
+	var extraValLines []string
+	if valSuffix != "" {
+		lastPathW := lipgloss.Width(pathLines[len(pathLines)-1])
+		valW := lipgloss.Width(valSuffix)
+		if lastPathW+2+valW <= availPathW {
+			appendValInline = true
+		} else {
+			wrappedVal := PaintLine(valSuffix, availPathW, bg, pathFg)
+			extraValLines = strings.Split(wrappedVal, "\n")
+		}
+	}
+
+	out := make([]string, 0, len(pathLines)+len(extraValLines))
+	for i, pl := range pathLines {
+		styledSeg := pathStyle.Render(pl)
+		if i == len(pathLines)-1 && appendValInline {
+			styledSeg += lipgloss.NewStyle().Background(bg).Render("  ") + valSuffix
+		}
+		if i == 0 {
+			out = append(out, PaintBarLine(firstGutter+badgePrefix+styledSeg, totalW, bg, pathFg))
+		} else {
+			out = append(out, PaintBarLine(contGutter+hangIndent+styledSeg, totalW, bg, pathFg))
+		}
+	}
+	for _, vl := range extraValLines {
+		out = append(out, PaintBarLine(contGutter+hangIndent+vl, totalW, bg, pathFg))
 	}
 	return out
 }

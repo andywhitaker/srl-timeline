@@ -741,13 +741,27 @@ func classifyBlameSubsystem(content string) string {
 }
 
 func (m BlameViewModel) buildToolbar(innerW int) (string, []HitChip) {
-	specs := []toolbarPillSpec{
-		{label: "attribution", text: "[1] Attribution", active: !m.isAnalytics(), padH: 1},
-		{label: "analytics", text: "[2] Analytics", active: m.isAnalytics(), padH: 1},
-		{label: "wrap", text: "[w] Wrap", active: m.WrapLines, padH: 1},
+	compact := innerW < compactToolbarThreshold
+	var specs []toolbarPillSpec
+	if compact {
+		padH := 1
+		if innerW < tightToolbarPadThreshold {
+			padH = 0
+		}
+		specs = []toolbarPillSpec{
+			{label: "attribution", text: "1:Attr", active: !m.isAnalytics(), padH: padH, fixedPad: true},
+			{label: "analytics", text: "2:Stats", active: m.isAnalytics(), padH: padH, fixedPad: true},
+			{label: "wrap", text: "w:Wrap", active: m.WrapLines, padH: padH, fixedPad: true},
+		}
+	} else {
+		specs = []toolbarPillSpec{
+			{label: "attribution", text: "[1] Attribution", active: !m.isAnalytics(), padH: 1},
+			{label: "analytics", text: "[2] Analytics", active: m.isAnalytics(), padH: 1},
+			{label: "wrap", text: "[w] Wrap", active: m.WrapLines, padH: 1},
+		}
 	}
-	scrollBadge := renderCompactScrollStatus(m.Viewport)
-	return buildToolbarLine(specs, m.IsFocused, scrollBadge, innerW)
+	scrollPrimary, scrollFallback := renderToolbarScrollStatuses(m.Viewport, compact)
+	return buildToolbarLine(specs, m.IsFocused, scrollPrimary, scrollFallback, innerW)
 }
 
 // ControlHitRanges returns clickable toolbar pill hit ranges relative to the inner pane X=0.
@@ -784,7 +798,7 @@ func (m BlameViewModel) View() string {
 	sections = append(sections, controlsBar)
 
 	if m.hasContextStrip() {
-		sections = append(sections, renderCommitContextStrip(m.Commit, m.BaseCommit, false, innerW))
+		sections = append(sections, renderCommitContextStrip(m.Commit, m.BaseCommit, false, nil, innerW))
 	}
 	if m.hasPinnedHeader() {
 		sections = append(sections, m.renderPinnedHeader(innerW))

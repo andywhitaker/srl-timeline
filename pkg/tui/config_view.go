@@ -306,12 +306,25 @@ func isJSONDelimAfter(s string, pos int) bool {
 }
 
 func (m ConfigViewModel) buildToolbar(innerW int) (string, []HitChip) {
-	specs := []toolbarPillSpec{
-		{label: "cli", text: "[1] CLI", active: m.FormatMode != "json", padH: 1},
-		{label: "json", text: "[2] JSON", active: m.FormatMode == "json", padH: 1},
+	compact := innerW < compactToolbarThreshold
+	var specs []toolbarPillSpec
+	if compact {
+		padH := 1
+		if innerW < tightToolbarPadThreshold {
+			padH = 0
+		}
+		specs = []toolbarPillSpec{
+			{label: "cli", text: "1:CLI", active: m.FormatMode != "json", padH: padH, fixedPad: true},
+			{label: "json", text: "2:JSON", active: m.FormatMode == "json", padH: padH, fixedPad: true},
+		}
+	} else {
+		specs = []toolbarPillSpec{
+			{label: "cli", text: "[1] CLI", active: m.FormatMode != "json", padH: 1},
+			{label: "json", text: "[2] JSON", active: m.FormatMode == "json", padH: 1},
+		}
 	}
-	scrollBadge := renderCompactScrollStatus(m.Viewport)
-	return buildToolbarLine(specs, m.IsFocused, scrollBadge, innerW)
+	scrollPrimary, scrollFallback := renderToolbarScrollStatuses(m.Viewport, compact)
+	return buildToolbarLine(specs, m.IsFocused, scrollPrimary, scrollFallback, innerW)
 }
 
 // ControlHitRanges returns clickable toolbar pill hit ranges relative to the inner pane X=0.
@@ -340,7 +353,7 @@ func (m ConfigViewModel) View() string {
 	sections = append(sections, controlsBar)
 
 	if m.hasContextStrip() {
-		sections = append(sections, renderCommitContextStrip(m.Commit, m.BaseCommit, false, innerW))
+		sections = append(sections, renderCommitContextStrip(m.Commit, m.BaseCommit, false, nil, innerW))
 	}
 
 	vpH := innerH - len(sections)

@@ -354,8 +354,8 @@ func (m *TimelineViewModel) UpdateViewportContent() {
 		}
 		authorStyled := authorStyle.Render(authorName)
 
-		// Relative time
-		relTime := c.RelativeTime()
+		// Compact relative time ("27m" instead of "27m ago") so HEAD cards comfortably fit diff stats
+		relTime := compactRelativeTime(c.RelativeTime())
 		timeStyled := lipgloss.NewStyle().Foreground(ColorTextDim).Background(rowBg).Render(relTime)
 
 		// Color-coded multi-part DiffStat tokens (+N green, ~N warning, -N danger)
@@ -422,6 +422,16 @@ func (m *TimelineViewModel) UpdateViewportContent() {
 	}
 
 	m.Viewport.SetContent(strings.Join(rows, "\n"))
+}
+
+// compactRelativeTime strips the redundant " ago" suffix (and shortens "just now" to "now")
+// so Timeline HEAD cards fit badges, author, timestamp, and full diff stats at 120x35.
+func compactRelativeTime(rel string) string {
+	s := strings.TrimSpace(rel)
+	if s == "just now" {
+		return "now"
+	}
+	return strings.TrimSuffix(s, " ago")
 }
 
 // commitSubtitle prefers a non-generic user message, else c.SummaryScope, else c.Message.
