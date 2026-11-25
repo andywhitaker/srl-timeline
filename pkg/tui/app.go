@@ -47,6 +47,7 @@ const (
 	ModalExport
 	ModalRemote
 	ModalHelp
+	ModalTheme
 )
 
 // RealtimeCommitMsg is sent when the daemon detects a new commit.
@@ -54,13 +55,15 @@ type RealtimeCommitMsg struct {
 	Commit models.TimelineCommit
 }
 
-// NotificationMsg is sent to display a banner alert.
+// NotificationMsg is sent to display an inline footer toast alert.
 type NotificationMsg struct {
 	Message  string
 	Severity string // "info", "success", "error", "warning"
 }
 
-type clearNotificationMsg struct{}
+type clearNotificationMsg struct {
+	seq int
+}
 
 type systemInfoMsg struct {
 	info map[string]string
@@ -73,6 +76,14 @@ type headSHAMsg struct {
 type remoteSyncStatusMsg struct {
 	status string
 	pubKey string
+}
+
+type daemonStatusMsg struct {
+	running bool
+}
+
+type summaryScopesMsg struct {
+	scopes map[string]string
 }
 
 // AppModel is the primary Bubble Tea model.
@@ -93,6 +104,7 @@ type AppModel struct {
 	ExportModal     modals.ExportModalModel
 	RemoteModal     modals.RemoteModalModel
 	HelpModal       modals.HelpModalModel
+	ThemeModal      modals.ThemeModal
 
 	// Backend services
 	GitBackend  *gitbackend.GitBackend
@@ -103,21 +115,29 @@ type AppModel struct {
 	BlameEngine *blame.BlameEngine
 
 	// State
-	FocusedPane       FocusedPane
-	ActiveTab         ActiveTab
-	Notification      string
-	NotifyStyle       lipgloss.Style
-	notifyKind        string
-	Width             int
-	Height            int
-	FocusFilter       bool
-	VsLive            bool
-	lastHeadSHA       string
-	cachedLiveConfig  map[string]interface{}
-	liveConfigFetched time.Time
-	isFetchingLiveCfg bool
-	isCheckingHead    bool
-	isRestoring       bool
+	FocusedPane         FocusedPane
+	ActiveTab           ActiveTab
+	Notification        string
+	NotifyStyle         lipgloss.Style
+	notifyKind          string
+	notifySeq           int
+	Width               int
+	Height              int
+	FocusFilter         bool
+	VsLive              bool
+	Zoomed              bool
+	BaseCommitSHA       string
+	baseCommit          *models.TimelineCommit
+	lastHeadSHA         string
+	lastDetailCommitSHA string
+	lastDetailTab       ActiveTab
+	lastCompareKey      string
+	scopeBackfilled     map[string]bool
+	cachedLiveConfig    map[string]interface{}
+	liveConfigFetched   time.Time
+	isFetchingLiveCfg   bool
+	isCheckingHead      bool
+	isRestoring         bool
 
 	// Realtime channel
 	commitChan chan models.TimelineCommit
@@ -148,6 +168,10 @@ func NewAppModel(backend *gitbackend.GitBackend, client *srlclient.SRLClient, in
 		}
 	}
 
+	hb := NewHeaderBarModel(100)
+	running, _, _ := daemon.IsAnyDaemonRunning()
+	hb.IsRealtime = running
+
 	fb := NewFilterBarModel(100)
 	if initialFilter != "" {
 		fb.TextInput.SetValue(initialFilter)
@@ -156,9 +180,9 @@ func NewAppModel(backend *gitbackend.GitBackend, client *srlclient.SRLClient, in
 	commitChan := make(chan models.TimelineCommit, 10)
 
 	m := AppModel{
-		HeaderBar:    NewHeaderBarModel(100),
+		HeaderBar:    hb,
 		FilterBar:    fb,
-		TimelineView: NewTimelineViewModel(45, 25),
+		TimelineView: NewTimelineViewModel(40, 25),
 		DiffView:     NewDiffViewModel(70, 25),
 		ConfigView:   NewConfigViewModel(70, 25),
 		BlameView:    NewBlameViewModel(70, 25),
@@ -171,11 +195,12 @@ func NewAppModel(backend *gitbackend.GitBackend, client *srlclient.SRLClient, in
 		Exporter:    e,
 		BlameEngine: b,
 
-		FocusedPane: PaneTimeline,
-		ActiveTab:   TabDiff,
-		ActiveModal: ModalNone,
-		lastHeadSHA: backend.GetHeadSHA(),
-		commitChan:  commitChan,
+		FocusedPane:     PaneTimeline,
+		ActiveTab:       TabDiff,
+		ActiveModal:     ModalNone,
+		lastHeadSHA:     backend.GetHeadSHA(),
+		scopeBackfilled: make(map[string]bool),
+		commitChan:      commitChan,
 	}
 
 	// Register daemon listener
@@ -183,10 +208,13 @@ func NewAppModel(backend *gitbackend.GitBackend, client *srlclient.SRLClient, in
 		commitChan <- c
 	})
 
+	// Initial timeline load (without blocking on legacy SummaryScope diffs)
+	m.refreshTimeline()
+
 	return m
 }
 
-// RefreshTheme re-renders all stateful sub-components after a theme change.
+// RefreshTheme re-renders all stateful sub-components after a theme change while preserving scroll offsets.
 func (m *AppModel) RefreshTheme() {
 	m.FilterBar.RefreshStyles()
 	StyleTextInput(&m.ExportModal.PathInput, ColorSurface, ColorText, ColorTextDim, ColorActive)
@@ -198,11 +226,15 @@ func (m *AppModel) RefreshTheme() {
 	case "error":
 		m.NotifyStyle = lipgloss.NewStyle().Background(ColorDangerBg).Foreground(ColorOnAccent).Bold(true).Padding(0, 1)
 	case "warning":
-		m.NotifyStyle = lipgloss.NewStyle().Background(ColorWarning).Foreground(ColorOnAccent).Bold(true).Padding(0, 1)
+		m.NotifyStyle = lipgloss.NewStyle().Background(ColorWarningBg).Foreground(ColorOnWarning).Bold(true).Padding(0, 1)
 	case "primary":
 		m.NotifyStyle = lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1)
 	}
+
+	prevTimelineY := m.TimelineView.Viewport.YOffset
 	m.TimelineView.UpdateViewportContent()
+	m.TimelineView.Viewport.SetYOffset(prevTimelineY)
+
 	m.DiffView.UpdateContent()
 	m.ConfigView.lastRendered = ""
 	m.ConfigView.UpdateContent()
@@ -250,6 +282,13 @@ func checkHeadSHACmd(backend *gitbackend.GitBackend) tea.Cmd {
 	}
 }
 
+func checkDaemonStatusCmd() tea.Cmd {
+	return func() tea.Msg {
+		running, _, _ := daemon.IsAnyDaemonRunning()
+		return daemonStatusMsg{running: running}
+	}
+}
+
 func fetchRemoteStatusCmd(backend *gitbackend.GitBackend) tea.Cmd {
 	return func() tea.Msg {
 		if backend == nil {
@@ -262,14 +301,61 @@ func fetchRemoteStatusCmd(backend *gitbackend.GitBackend) tea.Cmd {
 	}
 }
 
+func fetchSummaryScopesCmd(backend *gitbackend.GitBackend, shas []string) tea.Cmd {
+	if backend == nil || len(shas) == 0 {
+		return nil
+	}
+	batch := append([]string(nil), shas...)
+	return func() tea.Msg {
+		scopes := make(map[string]string, len(batch))
+		for _, sha := range batch {
+			scopes[sha] = backend.GetCommitSummaryScope(sha)
+		}
+		return summaryScopesMsg{scopes: scopes}
+	}
+}
+
+func (m *AppModel) backfillSummaryScopesCmd() tea.Cmd {
+	if m.GitBackend == nil || len(m.TimelineView.Commits) == 0 {
+		return nil
+	}
+	const maxPerPass = 30
+	var missing []string
+	for _, c := range m.TimelineView.Commits {
+		if len(missing) >= maxPerPass {
+			break
+		}
+		if c.FullSHA == "" || strings.TrimSpace(c.SummaryScope) != "" {
+			continue
+		}
+		if m.scopeBackfilled != nil && m.scopeBackfilled[c.FullSHA] {
+			continue
+		}
+		missing = append(missing, c.FullSHA)
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	if m.scopeBackfilled == nil {
+		m.scopeBackfilled = make(map[string]bool, len(missing))
+	}
+	for _, sha := range missing {
+		m.scopeBackfilled[sha] = true
+	}
+	return fetchSummaryScopesCmd(m.GitBackend, missing)
+}
+
 // Init starts the Bubble Tea loop and background daemon if not already running.
 func (m AppModel) Init() tea.Cmd {
-	if running, _, _ := daemon.IsAnyDaemonRunning(); !running {
+	if running, _, _ := daemon.IsAnyDaemonRunning(); !running && m.Daemon != nil {
 		m.Daemon.Start()
 	}
 
 	return tea.Batch(
 		fetchSystemInfoCmd(m.SRLClient),
+		fetchRemoteStatusCmd(m.GitBackend),
+		checkDaemonStatusCmd(),
+		m.backfillSummaryScopesCmd(),
 		tickLiveDiskSyncCmd(),
 		waitForRealtimeCommit(m.commitChan),
 		tea.EnterAltScreen,
@@ -284,82 +370,117 @@ func waitForRealtimeCommit(sub chan models.TimelineCommit) tea.Cmd {
 	}
 }
 
-func clearNotificationCmd() tea.Cmd {
+func clearNotificationCmd(seq int) tea.Cmd {
 	return tea.Tick(4*time.Second, func(t time.Time) tea.Msg {
-		return clearNotificationMsg{}
+		return clearNotificationMsg{seq: seq}
 	})
 }
 
-func (m *AppModel) setNotification(text string, style lipgloss.Style) {
-	wasEmpty := m.Notification == ""
+func (m *AppModel) setNotification(text string, style lipgloss.Style) int {
+	m.notifySeq++
 	m.Notification = text
 	m.NotifyStyle = style
+	if text == "" {
+		m.notifyKind = ""
+		return m.notifySeq
+	}
 	switch style.GetBackground() {
 	case ColorSuccessBg:
 		m.notifyKind = "success"
 	case ColorDangerBg:
 		m.notifyKind = "error"
-	case ColorWarning:
+	case ColorWarningBg, ColorWarning:
 		m.notifyKind = "warning"
 	case ColorPrimary:
 		m.notifyKind = "primary"
+	default:
+		m.notifyKind = "primary"
 	}
-	isEmpty := m.Notification == ""
-	if wasEmpty != isEmpty && m.Width > 0 && m.Height > 0 {
-		m.syncPaneHeights()
+	return m.notifySeq
+}
+
+func (m *AppModel) setFocusedPane(pane FocusedPane) {
+	prevPane := m.FocusedPane
+	m.FocusedPane = pane
+	m.FocusFilter = (pane == PaneFilter)
+	if pane != PaneFilter {
+		m.FilterBar.Blur()
+	}
+	m.TimelineView.IsFocused = (pane == PaneTimeline)
+	detailFocused := (pane == PaneDetail)
+	m.DiffView.IsFocused = detailFocused
+	m.ConfigView.IsFocused = detailFocused
+	m.BlameView.IsFocused = detailFocused
+	if prevPane != pane {
+		prevY := m.TimelineView.Viewport.YOffset
+		m.TimelineView.UpdateViewportContent()
+		m.TimelineView.Viewport.SetYOffset(prevY)
+		if m.ActiveTab == TabBlame {
+			m.BlameView.lastRendered = ""
+			m.BlameView.UpdateContent()
+		}
 	}
 }
 
 func computeSplitOuterWidths(totalWidth int) (int, int) {
-	timelineOuterWidth := (totalWidth * 38) / 100
-	if timelineOuterWidth < 35 {
-		timelineOuterWidth = 35
+	if totalWidth <= 0 {
+		return 0, 0
 	}
-	if timelineOuterWidth > totalWidth-42 {
-		timelineOuterWidth = totalWidth - 42
+	if totalWidth < 7 {
+		tl := totalWidth / 2
+		return tl, totalWidth - tl
 	}
-	if timelineOuterWidth < 20 {
-		timelineOuterWidth = 20
+
+	timelineOuterWidth := (totalWidth * 34) / 100
+	if timelineOuterWidth < 34 {
+		timelineOuterWidth = 34
+	}
+	if timelineOuterWidth > 50 {
+		timelineOuterWidth = 50
+	}
+
+	// Keep safe narrow fallback when totalWidth is small (e.g. 80 -> 34/45, 40 -> 19/20)
+	maxTimeline := totalWidth - 42
+	if half := (totalWidth - 1) / 2; maxTimeline < half {
+		maxTimeline = half
+	}
+	if timelineOuterWidth > maxTimeline {
+		timelineOuterWidth = maxTimeline
+	}
+	if timelineOuterWidth < 3 {
+		timelineOuterWidth = 3
 	}
 
 	detailOuterWidth := totalWidth - timelineOuterWidth - 1
-	if detailOuterWidth < 20 {
-		detailOuterWidth = 20
-	}
-
-	if totalWidth >= 7 && timelineOuterWidth+1+detailOuterWidth > totalWidth {
-		timelineOuterWidth = (totalWidth - 1) / 2
+	if detailOuterWidth < 3 {
+		detailOuterWidth = 3
+		timelineOuterWidth = totalWidth - detailOuterWidth - 1
 		if timelineOuterWidth < 3 {
 			timelineOuterWidth = 3
-		}
-		detailOuterWidth = totalWidth - timelineOuterWidth - 1
-		if detailOuterWidth < 3 {
-			detailOuterWidth = 3
 		}
 	}
 	return timelineOuterWidth, detailOuterWidth
 }
 
 func (m *AppModel) syncPaneHeights() {
+	m.DiffView.Zoomed = m.Zoomed
+	m.ConfigView.Zoomed = m.Zoomed
+	m.BlameView.Zoomed = m.Zoomed
+
 	if m.Width == 0 || m.Height == 0 {
 		return
 	}
-	notifExtra := 0
-	if m.Notification != "" {
-		notifExtra = 1
-	}
 
-	timelinePaneHeight := m.Height - 8 - notifExtra
-	if timelinePaneHeight < 5 {
-		timelinePaneHeight = 5
-	}
-
-	detailPaneHeight := m.Height - 9 - notifExtra
-	if detailPaneHeight < 4 {
-		detailPaneHeight = 4
+	// Rows: 0=Header, 1=Filter, 2..Height-2=Main Split (outer=Height-3, inner=Height-5), Height-1=Footer
+	paneInnerHeight := m.Height - 5
+	if paneInnerHeight < 3 {
+		paneInnerHeight = 3
 	}
 
 	timelineOuterWidth, detailOuterWidth := computeSplitOuterWidths(m.Width)
+	if m.Zoomed {
+		detailOuterWidth = m.Width
+	}
 
 	timelineInnerWidth := timelineOuterWidth - 2
 	if timelineInnerWidth < 1 {
@@ -370,10 +491,120 @@ func (m *AppModel) syncPaneHeights() {
 		detailInnerWidth = 1
 	}
 
-	m.TimelineView.SetSize(timelineInnerWidth, timelinePaneHeight)
-	m.DiffView.SetSize(detailInnerWidth, detailPaneHeight)
-	m.ConfigView.SetSize(detailInnerWidth, detailPaneHeight)
-	m.BlameView.SetSize(detailInnerWidth, detailPaneHeight)
+	m.TimelineView.SetSize(timelineInnerWidth, paneInnerHeight)
+	m.DiffView.SetSize(detailInnerWidth, paneInnerHeight)
+	m.ConfigView.SetSize(detailInnerWidth, paneInnerHeight)
+	m.BlameView.SetSize(detailInnerWidth, paneInnerHeight)
+}
+
+func (m *AppModel) toggleVsLive() tea.Cmd {
+	var cmds []tea.Cmd
+	m.VsLive = !m.VsLive
+	m.DiffView.VsLive = m.VsLive
+
+	if m.VsLive && m.BaseCommitSHA != "" {
+		m.BaseCommitSHA = ""
+		m.baseCommit = nil
+		m.TimelineView.BaseCommitSHA = ""
+		prevY := m.TimelineView.Viewport.YOffset
+		m.TimelineView.UpdateViewportContent()
+		m.TimelineView.Viewport.SetYOffset(prevY)
+	}
+
+	m.DiffView.ResetScroll()
+
+	var notif string
+	if m.VsLive {
+		notif = "Comparing revision vs LIVE running config [4/v]"
+		if !m.isFetchingLiveCfg {
+			m.isFetchingLiveCfg = true
+			cmds = append(cmds, fetchLiveConfigCmd(m.SRLClient))
+		}
+	} else {
+		notif = "Comparing revision vs previous commit"
+	}
+
+	seq := m.setNotification(
+		notif,
+		lipgloss.NewStyle().Background(ColorWarningBg).Foreground(ColorOnWarning).Bold(true).Padding(0, 1),
+	)
+	cmds = append(cmds, clearNotificationCmd(seq))
+	m.updateActiveTabContent()
+	return tea.Batch(cmds...)
+}
+
+func (m *AppModel) toggleBaseCommit() tea.Cmd {
+	selected := m.TimelineView.SelectedCommit()
+	if selected == nil {
+		return nil
+	}
+
+	if m.BaseCommitSHA == selected.FullSHA {
+		m.BaseCommitSHA = ""
+		m.baseCommit = nil
+		m.TimelineView.BaseCommitSHA = ""
+		prevY := m.TimelineView.Viewport.YOffset
+		m.TimelineView.UpdateViewportContent()
+		m.TimelineView.Viewport.SetYOffset(prevY)
+		m.updateActiveTabContent()
+		seq := m.setNotification(
+			"Unpinned compare base commit",
+			lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
+		)
+		return clearNotificationCmd(seq)
+	}
+
+	bc := *selected
+	m.baseCommit = &bc
+	m.BaseCommitSHA = selected.FullSHA
+	m.TimelineView.BaseCommitSHA = m.BaseCommitSHA
+	if m.VsLive {
+		m.VsLive = false
+		m.DiffView.VsLive = false
+	}
+
+	prevY := m.TimelineView.Viewport.YOffset
+	m.TimelineView.UpdateViewportContent()
+	m.TimelineView.Viewport.SetYOffset(prevY)
+	m.updateActiveTabContent()
+
+	seq := m.setNotification(
+		fmt.Sprintf("Pinned base %s — select another commit to compare (m to unpin)", selected.CommitID),
+		lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
+	)
+	return clearNotificationCmd(seq)
+}
+
+func (m *AppModel) jumpToBlameSelectedCommit() tea.Cmd {
+	entry := m.BlameView.SelectedEntry()
+	if entry == nil || strings.TrimSpace(entry.CommitSHA) == "" {
+		return nil
+	}
+
+	target := strings.TrimSpace(entry.CommitSHA)
+	foundIdx := -1
+	for i, c := range m.TimelineView.Commits {
+		if c.FullSHA == target ||
+			(len(target) >= 6 && strings.HasPrefix(c.FullSHA, target)) ||
+			(len(c.FullSHA) >= 6 && strings.HasPrefix(target, c.FullSHA)) ||
+			c.CommitID == target {
+			foundIdx = i
+			break
+		}
+	}
+
+	if foundIdx < 0 {
+		seq := m.setNotification(
+			fmt.Sprintf("Commit %s not in current filtered timeline", entry.ShortSHA()),
+			lipgloss.NewStyle().Background(ColorWarningBg).Foreground(ColorOnWarning).Bold(true).Padding(0, 1),
+		)
+		return clearNotificationCmd(seq)
+	}
+
+	m.TimelineView.SelectIndex(foundIdx)
+	m.ActiveTab = TabDiff
+	m.updateActiveTabContent()
+	return nil
 }
 
 // Update processes Bubble Tea events and coordinates state changes.
@@ -399,6 +630,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case daemonStatusMsg:
+		m.HeaderBar.IsRealtime = msg.running
+
 	case remoteSyncStatusMsg:
 		if msg.status != "" && msg.status != "Not Configured" {
 			m.HeaderBar.SyncStatus = msg.status
@@ -411,6 +645,29 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if msg.pubKey != "" {
 				m.RemoteModal.Config.PublicKey = msg.pubKey
+			}
+		}
+
+	case summaryScopesMsg:
+		if len(msg.scopes) > 0 {
+			if m.scopeBackfilled == nil {
+				m.scopeBackfilled = make(map[string]bool, len(msg.scopes))
+			}
+			for sha := range msg.scopes {
+				m.scopeBackfilled[sha] = true
+			}
+			updated := false
+			for i := range m.TimelineView.Commits {
+				sha := m.TimelineView.Commits[i].FullSHA
+				if scope, ok := msg.scopes[sha]; ok && scope != "" && m.TimelineView.Commits[i].SummaryScope == "" {
+					m.TimelineView.Commits[i].SummaryScope = scope
+					updated = true
+				}
+			}
+			if updated {
+				prevY := m.TimelineView.Viewport.YOffset
+				m.TimelineView.UpdateViewportContent()
+				m.TimelineView.Viewport.SetYOffset(prevY)
 			}
 		}
 
@@ -429,6 +686,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.isCheckingHead = true
 			cmds = append(cmds, checkHeadSHACmd(m.GitBackend))
 		}
+		cmds = append(cmds, checkDaemonStatusCmd())
 		if m.VsLive && !m.isFetchingLiveCfg && time.Since(m.liveConfigFetched) > 3*time.Second {
 			m.isFetchingLiveCfg = true
 			cmds = append(cmds, fetchLiveConfigCmd(m.SRLClient))
@@ -443,13 +701,14 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cachedLiveConfig = m.GitBackend.GetLatestCommitConfig()
 			m.liveConfigFetched = time.Now()
 			m.refreshTimeline()
+			cmds = append(cmds, m.backfillSummaryScopesCmd())
 			selected := m.TimelineView.SelectedCommit()
 			if selected != nil && selected.FullSHA == currentHead {
-				m.setNotification(
-					fmt.Sprintf("⚡ Live update by %s: %s", selected.Author, selected.Message),
+				seq := m.setNotification(
+					fmt.Sprintf("Live update by %s: %s", selected.Author, selected.Message),
 					lipgloss.NewStyle().Background(ColorSuccessBg).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 				)
-				cmds = append(cmds, clearNotificationCmd())
+				cmds = append(cmds, clearNotificationCmd(seq))
 			}
 		}
 
@@ -457,12 +716,13 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastHeadSHA = msg.Commit.FullSHA
 		m.cachedLiveConfig = m.GitBackend.GetLatestCommitConfig()
 		m.liveConfigFetched = time.Now()
-		m.setNotification(
-			fmt.Sprintf("⚡ Realtime commit by %s: %s", msg.Commit.Author, msg.Commit.Message),
+		seq := m.setNotification(
+			fmt.Sprintf("Realtime commit by %s: %s", msg.Commit.Author, msg.Commit.Message),
 			lipgloss.NewStyle().Background(ColorSuccessBg).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 		)
-		cmds = append(cmds, clearNotificationCmd())
+		cmds = append(cmds, clearNotificationCmd(seq))
 		m.refreshTimeline()
+		cmds = append(cmds, m.backfillSummaryScopesCmd())
 		cmds = append(cmds, waitForRealtimeCommit(m.commitChan))
 
 	case NotificationMsg:
@@ -472,16 +732,19 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "error":
 			style = lipgloss.NewStyle().Background(ColorDangerBg).Foreground(ColorOnAccent).Bold(true).Padding(0, 1)
 		case "warning":
-			style = lipgloss.NewStyle().Background(ColorWarning).Foreground(ColorOnAccent).Bold(true).Padding(0, 1)
+			style = lipgloss.NewStyle().Background(ColorWarningBg).Foreground(ColorOnWarning).Bold(true).Padding(0, 1)
 		default:
 			style = lipgloss.NewStyle().Background(ColorSuccessBg).Foreground(ColorOnAccent).Bold(true).Padding(0, 1)
 		}
-		m.setNotification(msg.Message, style)
+		seq := m.setNotification(msg.Message, style)
 		m.refreshTimeline()
-		cmds = append(cmds, clearNotificationCmd())
+		cmds = append(cmds, m.backfillSummaryScopesCmd(), clearNotificationCmd(seq))
 
 	case clearNotificationMsg:
-		m.setNotification("", m.NotifyStyle)
+		if msg.seq == m.notifySeq {
+			m.Notification = ""
+			m.notifyKind = ""
+		}
 
 	case tea.KeyMsg:
 		// If Modal is open, delegate exclusively to Modal
@@ -496,87 +759,92 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.FilterBar.Value() != "" {
 					m.FilterBar.Clear()
 				}
-				m.FocusFilter = false
-				m.FocusedPane = PaneTimeline
-				m.FilterBar.Blur()
-				m.TimelineView.IsFocused = true
-				m.DiffView.IsFocused = false
-				m.ConfigView.IsFocused = false
-				m.BlameView.IsFocused = false
+				m.setFocusedPane(PaneTimeline)
 				m.refreshTimeline()
-				return m, nil
-			case "enter":
-				m.FocusFilter = false
-				m.FocusedPane = PaneTimeline
-				m.FilterBar.Blur()
-				m.TimelineView.IsFocused = true
-				m.DiffView.IsFocused = false
-				m.ConfigView.IsFocused = false
-				m.BlameView.IsFocused = false
+				return m, m.backfillSummaryScopesCmd()
+			case "enter", "tab", "down":
+				m.setFocusedPane(PaneTimeline)
 				m.refreshTimeline()
-				return m, nil
-			case "ctrl+u", "ctrl+c":
+				return m, m.backfillSummaryScopesCmd()
+			case "ctrl+c":
+				if m.FilterBar.Value() != "" {
+					m.FilterBar.Clear()
+					m.refreshTimeline()
+					return m, m.backfillSummaryScopesCmd()
+				}
+				if m.Daemon != nil {
+					m.Daemon.Stop()
+				}
+				return m, tea.Quit
+			case "ctrl+u":
 				m.FilterBar.Clear()
 				m.refreshTimeline()
+				return m, m.backfillSummaryScopesCmd()
+			case "ctrl+t":
+				m.ThemeModal = modals.NewThemeModal(m.Width, m.Height)
+				m.ActiveModal = ModalTheme
 				return m, nil
 			default:
 				var cmd tea.Cmd
 				m.FilterBar, cmd = m.FilterBar.Update(msg)
 				m.refreshTimeline()
-				return m, cmd
+				return m, tea.Batch(cmd, m.backfillSummaryScopesCmd())
 			}
 		}
 
 		// 2. Filter Activation Shortcut
 		if msg.String() == "/" {
-			m.FocusFilter = true
-			m.FocusedPane = PaneFilter
-			m.TimelineView.IsFocused = false
-			m.DiffView.IsFocused = false
-			m.ConfigView.IsFocused = false
-			m.BlameView.IsFocused = false
+			m.setFocusedPane(PaneFilter)
 			return m, m.FilterBar.Focus()
 		}
 
-		// 3. Clear filter on Esc or 'x'
-		if (msg.String() == "esc" || msg.String() == "x") && m.FilterBar.Value() != "" {
-			m.FilterBar.Clear()
-			m.refreshTimeline()
+		// 3. Esc hierarchy & 'x' filter clear
+		switch msg.String() {
+		case "esc":
+			if m.Zoomed {
+				m.Zoomed = false
+				m.syncPaneHeights()
+				return m, nil
+			}
+			if m.FocusedPane == PaneDetail {
+				m.setFocusedPane(PaneTimeline)
+				return m, nil
+			}
+			if m.FilterBar.Value() != "" {
+				m.FilterBar.Clear()
+				m.refreshTimeline()
+				return m, m.backfillSummaryScopesCmd()
+			}
 			return m, nil
+
+		case "x":
+			if m.FilterBar.Value() != "" {
+				m.FilterBar.Clear()
+				m.refreshTimeline()
+				return m, m.backfillSummaryScopesCmd()
+			}
 		}
 
-		// 4. Pane Navigation (Tab, Left, Right, h, l)
+		// 4. Pane Navigation (Tab, Shift+Tab, Left, Right, h, l)
 		switch msg.String() {
-		case "tab":
-			if m.FocusedPane == PaneTimeline {
-				m.FocusedPane = PaneDetail
-				m.TimelineView.IsFocused = false
-				m.DiffView.IsFocused = true
-				m.ConfigView.IsFocused = true
-				m.BlameView.IsFocused = true
-			} else {
-				m.FocusedPane = PaneTimeline
-				m.TimelineView.IsFocused = true
-				m.DiffView.IsFocused = false
-				m.ConfigView.IsFocused = false
-				m.BlameView.IsFocused = false
+		case "tab", "shift+tab":
+			if !m.Zoomed {
+				if m.FocusedPane == PaneTimeline {
+					m.setFocusedPane(PaneDetail)
+				} else {
+					m.setFocusedPane(PaneTimeline)
+				}
 			}
 			return m, nil
 
 		case "right", "l":
-			m.FocusedPane = PaneDetail
-			m.TimelineView.IsFocused = false
-			m.DiffView.IsFocused = true
-			m.ConfigView.IsFocused = true
-			m.BlameView.IsFocused = true
+			m.setFocusedPane(PaneDetail)
 			return m, nil
 
 		case "left", "h":
-			m.FocusedPane = PaneTimeline
-			m.TimelineView.IsFocused = true
-			m.DiffView.IsFocused = false
-			m.ConfigView.IsFocused = false
-			m.BlameView.IsFocused = false
+			if !m.Zoomed {
+				m.setFocusedPane(PaneTimeline)
+			}
 			return m, nil
 		}
 
@@ -607,31 +875,53 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 6. Global action keys
 		switch msg.String() {
 		case "q", "ctrl+c":
-			m.Daemon.Stop()
+			if m.Daemon != nil {
+				m.Daemon.Stop()
+			}
 			return m, tea.Quit
+
+		case "z":
+			m.Zoomed = !m.Zoomed
+			if m.Zoomed {
+				m.setFocusedPane(PaneDetail)
+			}
+			m.syncPaneHeights()
+			return m, nil
+
+		case "m":
+			return m, m.toggleBaseCommit()
 
 		case "T":
 			t := NextTheme()
 			m.RefreshTheme()
-			m.setNotification(
-				fmt.Sprintf("Theme: %s (%s) — press [T] to cycle", t.DisplayName, t.Name),
+			seq := m.setNotification(
+				fmt.Sprintf("Theme: %s (%s) — [T] cycle · [Ctrl+t] picker", t.DisplayName, t.Name),
 				lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 			)
-			cmds = append(cmds, clearNotificationCmd())
-			return m, tea.Batch(cmds...)
+			return m, clearNotificationCmd(seq)
+
+		case "ctrl+t":
+			m.ThemeModal = modals.NewThemeModal(m.Width, m.Height)
+			m.ActiveModal = ModalTheme
+			return m, nil
 
 		case "r":
 			if m.isRestoring {
-				m.setNotification(
+				seq := m.setNotification(
 					"Restore/cherry-pick operation already in progress...",
-					lipgloss.NewStyle().Background(ColorWarning).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
+					lipgloss.NewStyle().Background(ColorWarningBg).Foreground(ColorOnWarning).Bold(true).Padding(0, 1),
 				)
-				cmds = append(cmds, clearNotificationCmd())
-				return m, tea.Batch(cmds...)
+				return m, clearNotificationCmd(seq)
 			}
 			selected := m.TimelineView.SelectedCommit()
 			if selected != nil {
-				m.RestoreModal = modals.NewRestoreModal(*selected, m.Width, m.Height)
+				runningCfg := m.cachedLiveConfig
+				if len(runningCfg) == 0 {
+					runningCfg = m.GitBackend.GetLatestCommitConfig()
+				}
+				targetCfg := m.GitBackend.GetConfigAtCommit(selected.FullSHA)
+				impact := differ.SemanticDiff(runningCfg, targetCfg, "")
+				m.RestoreModal = modals.NewRestoreModalWithImpact(*selected, impact, m.Width, m.Height)
 				m.ActiveModal = ModalRestore
 			}
 			return m, nil
@@ -639,21 +929,19 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "R", "ctrl+r", "f5":
 			m.lastHeadSHA = m.GitBackend.GetHeadSHA()
 			m.refreshTimeline()
-			m.setNotification(
+			seq := m.setNotification(
 				"Refreshed timeline from disk",
 				lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 			)
-			cmds = append(cmds, clearNotificationCmd())
-			return m, tea.Batch(cmds...)
+			return m, tea.Batch(m.backfillSummaryScopesCmd(), clearNotificationCmd(seq))
 
 		case "p":
 			if m.isRestoring {
-				m.setNotification(
+				seq := m.setNotification(
 					"Restore/cherry-pick operation already in progress...",
-					lipgloss.NewStyle().Background(ColorWarning).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
+					lipgloss.NewStyle().Background(ColorWarningBg).Foreground(ColorOnWarning).Bold(true).Padding(0, 1),
 				)
-				cmds = append(cmds, clearNotificationCmd())
-				return m, tea.Batch(cmds...)
+				return m, clearNotificationCmd(seq)
 			}
 			selected := m.TimelineView.SelectedCommit()
 			if selected != nil {
@@ -690,85 +978,71 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// 7. View-specific sub-options
+		// 7. View-specific sub-options (instant visual toggles without noisy toasts)
 		switch m.ActiveTab {
 		case TabDiff:
 			switch msg.String() {
 			case "1", "u":
 				m.DiffView.DiffMode = "unified"
+				m.DiffView.ResetScroll()
 				m.DiffView.UpdateContent()
-				m.setNotification(
-					"Diff Format: UNIFIED [1]",
-					lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
-				)
-				cmds = append(cmds, clearNotificationCmd())
-				return m, tea.Batch(cmds...)
+				return m, nil
 			case "2":
 				m.DiffView.DiffMode = "path"
+				m.DiffView.ResetScroll()
 				m.DiffView.UpdateContent()
-				m.setNotification(
-					"Diff Format: PATH CHANGES [2]",
-					lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
-				)
-				cmds = append(cmds, clearNotificationCmd())
-				return m, tea.Batch(cmds...)
+				return m, nil
 			case "3":
 				m.DiffView.DiffMode = "cli"
+				m.DiffView.ResetScroll()
 				m.DiffView.UpdateContent()
-				m.setNotification(
-					"Diff Format: FLAT CLI DIFF [3]",
-					lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
-				)
-				cmds = append(cmds, clearNotificationCmd())
-				return m, tea.Batch(cmds...)
+				return m, nil
 			case "4", "v":
-				m.VsLive = !m.VsLive
-				m.DiffView.VsLive = m.VsLive
-				var notif string
-				if m.VsLive {
-					notif = "Diff Mode: Comparing revision vs LIVE Running Configuration [4/v]"
-					if !m.isFetchingLiveCfg {
-						m.isFetchingLiveCfg = true
-						cmds = append(cmds, fetchLiveConfigCmd(m.SRLClient))
-					}
-				} else {
-					notif = "Diff Mode: Comparing revision vs Previous Commit"
-				}
-				m.setNotification(
-					notif,
-					lipgloss.NewStyle().Background(ColorWarning).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
-				)
-				cmds = append(cmds, clearNotificationCmd())
-				m.updateActiveTabContent()
-				return m, tea.Batch(cmds...)
+				return m, m.toggleVsLive()
 			}
 
 		case TabConfig:
 			switch msg.String() {
 			case "1":
 				m.ConfigView.FormatMode = "cli"
+				m.ConfigView.ResetScroll()
 				m.ConfigView.UpdateContent()
-				m.setNotification(
-					"Config Format: FLAT CLI SYNTAX [1]",
-					lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
-				)
-				cmds = append(cmds, clearNotificationCmd())
-				return m, tea.Batch(cmds...)
+				return m, nil
 			case "2":
 				m.ConfigView.FormatMode = "json"
+				m.ConfigView.ResetScroll()
 				m.ConfigView.UpdateContent()
-				m.setNotification(
-					"Config Format: JSON HIERARCHY [2]",
-					lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
-				)
-				cmds = append(cmds, clearNotificationCmd())
-				return m, tea.Batch(cmds...)
+				return m, nil
+			}
+
+		case TabBlame:
+			switch msg.String() {
+			case "1":
+				m.BlameView.ViewMode = "attribution"
+				m.BlameView.ResetScroll()
+				m.BlameView.UpdateContent()
+				return m, nil
+			case "2":
+				m.BlameView.ViewMode = "analytics"
+				m.BlameView.ResetScroll()
+				m.BlameView.UpdateContent()
+				return m, nil
+			case "w":
+				m.BlameView.WrapLines = !m.BlameView.WrapLines
+				m.BlameView.ResetScroll()
+				m.BlameView.UpdateContent()
+				return m, nil
 			}
 		}
 
 		// 8. Navigation inside active pane
 		if m.FocusedPane == PaneDetail {
 			switch msg.String() {
+			case "enter":
+				if m.ActiveTab == TabBlame && m.BlameView.ViewMode == "attribution" {
+					return m, m.jumpToBlameSelectedCommit()
+				}
+				return m, nil
 			case "up", "k":
 				switch m.ActiveTab {
 				case TabDiff:
@@ -776,7 +1050,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case TabConfig:
 					m.ConfigView.Viewport.LineUp(2)
 				case TabBlame:
-					m.BlameView.Viewport.LineUp(2)
+					if m.BlameView.ViewMode == "attribution" {
+						m.BlameView.SelectPrev()
+					} else {
+						m.BlameView.Viewport.LineUp(2)
+					}
 				}
 				return m, nil
 			case "down", "j":
@@ -786,10 +1064,14 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case TabConfig:
 					m.ConfigView.Viewport.LineDown(2)
 				case TabBlame:
-					m.BlameView.Viewport.LineDown(2)
+					if m.BlameView.ViewMode == "attribution" {
+						m.BlameView.SelectNext()
+					} else {
+						m.BlameView.Viewport.LineDown(2)
+					}
 				}
 				return m, nil
-			case "pgup", "b", "ctrl+u":
+			case "pgup", "ctrl+u":
 				switch m.ActiveTab {
 				case TabDiff:
 					m.DiffView.Viewport.ViewUp()
@@ -809,13 +1091,18 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.BlameView.Viewport.ViewDown()
 				}
 				return m, nil
-			case "home", "g":
+			case "home":
 				switch m.ActiveTab {
 				case TabDiff:
 					m.DiffView.Viewport.GotoTop()
 				case TabConfig:
 					m.ConfigView.Viewport.GotoTop()
 				case TabBlame:
+					if m.BlameView.ViewMode == "attribution" && len(m.BlameView.Entries) > 0 {
+						m.BlameView.SelectedLine = 0
+						m.BlameView.lastRendered = ""
+						m.BlameView.UpdateContent()
+					}
 					m.BlameView.Viewport.GotoTop()
 				}
 				return m, nil
@@ -826,33 +1113,41 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case TabConfig:
 					m.ConfigView.Viewport.GotoBottom()
 				case TabBlame:
+					if m.BlameView.ViewMode == "attribution" && len(m.BlameView.Entries) > 0 {
+						m.BlameView.SelectedLine = len(m.BlameView.Entries) - 1
+						m.BlameView.lastRendered = ""
+						m.BlameView.UpdateContent()
+					}
 					m.BlameView.Viewport.GotoBottom()
 				}
 				return m, nil
 			}
 			return m, nil
-		} else {
-			// Navigate timeline commits
-			switch msg.String() {
-			case "j", "down":
-				m.TimelineView.Next()
-				m.updateActiveTabContent()
-			case "k", "up":
-				m.TimelineView.Prev()
-				m.updateActiveTabContent()
-			case "home":
-				m.TimelineView.GotoTop()
-				m.updateActiveTabContent()
-			case "end", "G":
-				m.TimelineView.GotoBottom()
-				m.updateActiveTabContent()
-			case "pgup", "ctrl+u":
-				m.TimelineView.PageUp()
-				m.updateActiveTabContent()
-			case "pgdown", " ", "space", "ctrl+d":
-				m.TimelineView.PageDown()
-				m.updateActiveTabContent()
-			}
+		}
+
+		// Navigate timeline commits
+		switch msg.String() {
+		case "enter":
+			m.setFocusedPane(PaneDetail)
+			return m, nil
+		case "j", "down":
+			m.TimelineView.Next()
+			m.updateActiveTabContent()
+		case "k", "up":
+			m.TimelineView.Prev()
+			m.updateActiveTabContent()
+		case "home":
+			m.TimelineView.GotoTop()
+			m.updateActiveTabContent()
+		case "end", "G":
+			m.TimelineView.GotoBottom()
+			m.updateActiveTabContent()
+		case "pgup", "ctrl+u":
+			m.TimelineView.PageUp()
+			m.updateActiveTabContent()
+		case "pgdown", " ", "space", "ctrl+d":
+			m.TimelineView.PageDown()
+			m.updateActiveTabContent()
 		}
 
 	case tea.MouseMsg:
@@ -863,7 +1158,36 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if m.ActiveModal == ModalCherryPick {
+	// Forward mouse events to active scrollable/interactive modals
+	switch m.ActiveModal {
+	case ModalTheme:
+		var changed, confirmed, close bool
+		m.ThemeModal, changed, confirmed, close = m.ThemeModal.Update(msg)
+		if changed {
+			m.RefreshTheme()
+		}
+		if close {
+			m.ActiveModal = ModalNone
+			if confirmed {
+				t := CurrentTheme()
+				seq := m.setNotification(
+					fmt.Sprintf("Theme: %s", t.DisplayName),
+					lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
+				)
+				return m, clearNotificationCmd(seq)
+			}
+		}
+		return m, nil
+
+	case ModalHelp:
+		var close bool
+		m.HelpModal, close = m.HelpModal.Update(msg)
+		if close {
+			m.ActiveModal = ModalNone
+		}
+		return m, nil
+
+	case ModalCherryPick:
 		var selectedSubtrees []string
 		var close bool
 		m.CherryPickModal, selectedSubtrees, close = m.CherryPickModal.Update(msg)
@@ -879,99 +1203,82 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				}
 				m.setNotification(
 					notifyStr,
-					lipgloss.NewStyle().Background(ColorWarning).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
+					lipgloss.NewStyle().Background(ColorWarningBg).Foreground(ColorOnWarning).Bold(true).Padding(0, 1),
 				)
 				sha := m.CherryPickModal.Commit.FullSHA
 				return m, performCherryPickCmd(m.Restorer, sha, selectedSubtrees...)
 			}
 		}
 		return m, nil
-	}
-	if m.ActiveModal != ModalNone {
+
+	case ModalNone:
+		// proceed to main screen hit-testing
+	default:
 		return m, nil
 	}
 
-	notifExtra := 0
-	if m.Notification != "" {
-		notifExtra = 1
+	if m.Width <= 0 || m.Height <= 0 || msg.Y < 0 || msg.X < 0 || msg.X >= m.Width {
+		return m, nil
 	}
 
-	timelineWidth, detailOuterWidth := computeSplitOuterWidths(m.Width)
-
-	// 1. Click on Filter Bar (Y == 2 or Y == 3)
-	if (msg.Y == 2 || msg.Y == 3) && msg.Type == tea.MouseLeft {
-		if m.FilterBar.Value() != "" && msg.X >= m.Width-25 {
-			m.FilterBar.Clear()
-			m.FocusFilter = false
-			m.FocusedPane = PaneTimeline
-			m.FilterBar.Blur()
-			m.TimelineView.IsFocused = true
-			m.refreshTimeline()
-			return m, nil
+	// Row 0: Header Bar (only Theme pill is clickable; never changes pane focus)
+	if msg.Y == 0 {
+		if msg.Type == tea.MouseLeft {
+			startX, endX := m.HeaderBar.ThemeHitRange()
+			if startX >= 0 && msg.X >= startX && msg.X < endX {
+				m.ThemeModal = modals.NewThemeModal(m.Width, m.Height)
+				m.ActiveModal = ModalTheme
+			}
 		}
-		m.FocusFilter = true
-		m.FocusedPane = PaneFilter
-		m.TimelineView.IsFocused = false
-		m.DiffView.IsFocused = false
-		m.ConfigView.IsFocused = false
-		m.BlameView.IsFocused = false
-		return m, m.FilterBar.Focus()
+		return m, nil
 	}
 
-	// 2. Click on Top Tab Bar (Y == 4 + notifExtra, X > timelineWidth)
-	if msg.Y == 4+notifExtra && msg.X > timelineWidth && msg.Type == tea.MouseLeft {
-		tabOffset := msg.X - timelineWidth
-		diffTitle := "🔍 Diff View [d]"
-		configTitle := "📄 Full Config [c]"
-		blameTitle := "🕵️ Blame View [b]"
-		if detailOuterWidth < 55 {
-			diffTitle = "[d] Diff"
-			configTitle = "[c] Config"
-			blameTitle = "[b] Blame"
+	// Row 1: Filter Bar (explicit Clear hit-range, quick chips, else focus Filter)
+	if msg.Y == 1 {
+		if msg.Type == tea.MouseLeft {
+			if clearStart, clearEnd := m.FilterBar.ClearHitRange(); clearStart >= 0 && msg.X >= clearStart && msg.X < clearEnd {
+				m.FilterBar.Clear()
+				m.setFocusedPane(PaneTimeline)
+				m.refreshTimeline()
+				return m, m.backfillSummaryScopesCmd()
+			}
+			for _, chip := range m.FilterBar.QuickChipHitRanges() {
+				if msg.X >= chip.StartX && msg.X < chip.EndX {
+					m.FilterBar.TextInput.SetValue(chip.Label)
+					m.setFocusedPane(PaneTimeline)
+					m.refreshTimeline()
+					return m, m.backfillSummaryScopesCmd()
+				}
+			}
+			m.setFocusedPane(PaneFilter)
+			return m, m.FilterBar.Focus()
 		}
-		tabDiffW := lipgloss.Width(StyleTabActive.Render(diffTitle))
-		tabConfigW := lipgloss.Width(StyleTabActive.Render(configTitle))
-		tabBlameW := lipgloss.Width(StyleTabActive.Render(blameTitle))
+		return m, nil
+	}
 
-		if tabOffset >= 0 && tabOffset <= tabDiffW {
-			m.ActiveTab = TabDiff
-			m.FocusedPane = PaneDetail
-			m.TimelineView.IsFocused = false
-			m.DiffView.IsFocused = true
-			m.ConfigView.IsFocused = true
-			m.BlameView.IsFocused = true
-			m.updateActiveTabContent()
-			return m, nil
-		} else if tabOffset > tabDiffW && tabOffset <= tabDiffW+tabConfigW {
-			m.ActiveTab = TabConfig
-			m.FocusedPane = PaneDetail
-			m.TimelineView.IsFocused = false
-			m.DiffView.IsFocused = true
-			m.ConfigView.IsFocused = true
-			m.BlameView.IsFocused = true
-			m.updateActiveTabContent()
-			return m, nil
-		} else if tabOffset > tabDiffW+tabConfigW && tabOffset <= tabDiffW+tabConfigW+tabBlameW {
-			m.ActiveTab = TabBlame
-			m.FocusedPane = PaneDetail
-			m.TimelineView.IsFocused = false
-			m.DiffView.IsFocused = true
-			m.ConfigView.IsFocused = true
-			m.BlameView.IsFocused = true
+	// Row m.Height-1 (and beyond): Footer Bar — never leaks into panes
+	if msg.Y >= m.Height-1 {
+		return m, nil
+	}
+
+	// Main Panes: Y in [2, m.Height-2]
+	timelineOuterW, detailOuterW := computeSplitOuterWidths(m.Width)
+	detailStartX := timelineOuterW + 1
+	if m.Zoomed {
+		timelineOuterW = 0
+		detailOuterW = m.Width
+		detailStartX = 0
+	}
+
+	// Scroll wheel: strictly routed by cursor X (never hijacks Timeline wheel when Detail is focused)
+	switch msg.Type {
+	case tea.MouseWheelUp:
+		if !m.Zoomed && msg.X < detailStartX {
+			m.TimelineView.Prev()
 			m.updateActiveTabContent()
 			return m, nil
 		}
-	}
-
-	// 3. Mouse Wheel on Right Detail Pane OR when Detail Pane is focused
-	if msg.X > timelineWidth || m.FocusedPane == PaneDetail {
-		switch msg.Type {
-		case tea.MouseWheelUp:
-			m.FocusedPane = PaneDetail
-			m.TimelineView.IsFocused = false
-			m.DiffView.IsFocused = true
-			m.ConfigView.IsFocused = true
-			m.BlameView.IsFocused = true
+		if msg.X >= detailStartX {
 			switch m.ActiveTab {
 			case TabDiff:
 				m.DiffView.Viewport.LineUp(3)
@@ -981,13 +1288,16 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				m.BlameView.Viewport.LineUp(3)
 			}
 			return m, nil
+		}
+		return m, nil
 
-		case tea.MouseWheelDown:
-			m.FocusedPane = PaneDetail
-			m.TimelineView.IsFocused = false
-			m.DiffView.IsFocused = true
-			m.ConfigView.IsFocused = true
-			m.BlameView.IsFocused = true
+	case tea.MouseWheelDown:
+		if !m.Zoomed && msg.X < detailStartX {
+			m.TimelineView.Next()
+			m.updateActiveTabContent()
+			return m, nil
+		}
+		if msg.X >= detailStartX {
 			switch m.ActiveTab {
 			case TabDiff:
 				m.DiffView.Viewport.LineDown(3)
@@ -998,110 +1308,158 @@ func (m AppModel) handleMouseMsg(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		return m, nil
 	}
 
-	// 4. Mouse on Left Timeline Pane (X <= timelineWidth)
-	if msg.X <= timelineWidth {
-		switch msg.Type {
-		case tea.MouseWheelUp:
-			m.TimelineView.Prev()
-			m.updateActiveTabContent()
-			return m, nil
+	if msg.Type != tea.MouseLeft {
+		return m, nil
+	}
 
-		case tea.MouseWheelDown:
-			m.TimelineView.Next()
-			m.updateActiveTabContent()
-			return m, nil
-
-		case tea.MouseLeft:
-			m.FocusedPane = PaneTimeline
-			m.TimelineView.IsFocused = true
-			m.DiffView.IsFocused = false
-			m.ConfigView.IsFocused = false
-			m.BlameView.IsFocused = false
-			if m.FocusFilter {
-				m.FocusFilter = false
-				m.FilterBar.Blur()
+	// Left click on Timeline Pane
+	if !m.Zoomed && msg.X < timelineOuterW {
+		m.setFocusedPane(PaneTimeline)
+		if msg.Y >= 3 && msg.Y <= m.Height-3 {
+			lpc := m.TimelineView.LinesPerCommit()
+			if lpc < 1 {
+				lpc = 2
 			}
+			clickedRow := (msg.Y - 3 + m.TimelineView.Viewport.YOffset) / lpc
+			if clickedRow >= 0 && clickedRow < len(m.TimelineView.Commits) {
+				m.TimelineView.SelectIndex(clickedRow)
+				m.updateActiveTabContent()
+			}
+		}
+		return m, nil
+	}
 
-			// Sub-row hit testing for commit list:
-			if msg.Y >= 6+notifExtra {
-				clickedRow := (msg.Y - (6 + notifExtra) + m.TimelineView.Viewport.YOffset) / 3
-				if clickedRow >= 0 && clickedRow < len(m.TimelineView.Commits) {
-					m.TimelineView.SelectedIndex = clickedRow
-					m.TimelineView.UpdateViewportContent()
+	// Left click on Detail Pane
+	if msg.X >= detailStartX {
+		// Detail Top Border (Y == 2): embedded tabs hit-testing
+		if msg.Y == 2 {
+			relX := msg.X - detailStartX
+			for _, chip := range DetailTabHitRanges(detailOuterW, m.Zoomed) {
+				if relX >= chip.StartX && relX < chip.EndX {
+					switch chip.Label {
+					case "diff":
+						m.ActiveTab = TabDiff
+					case "config":
+						m.ActiveTab = TabConfig
+					case "blame":
+						m.ActiveTab = TabBlame
+					}
+					m.setFocusedPane(PaneDetail)
 					m.updateActiveTabContent()
+					return m, nil
 				}
 			}
+			m.setFocusedPane(PaneDetail)
 			return m, nil
 		}
-	}
 
-	// 5. Mouse on Right Detail Pane (X > timelineWidth)
-	if msg.X > timelineWidth {
-		switch msg.Type {
-		case tea.MouseLeft:
-			m.FocusedPane = PaneDetail
-			m.TimelineView.IsFocused = false
-			m.DiffView.IsFocused = true
-			m.ConfigView.IsFocused = true
-			m.BlameView.IsFocused = true
-			if m.FocusFilter {
-				m.FocusFilter = false
-				m.FilterBar.Blur()
+		// Detail Toolbar (Y == 3): active view's ControlHitRanges
+		if msg.Y == 3 {
+			m.setFocusedPane(PaneDetail)
+			innerX := msg.X - detailStartX - 1
+			if innerX < 0 {
+				return m, nil
 			}
-
-			tabOffset := msg.X - timelineWidth
-
-			// Sub-Option Controls Bar Clicks (Y == 6 + notifExtra or Y == 7 + notifExtra)
-			if msg.Y == 6+notifExtra || msg.Y == 7+notifExtra {
-				if m.ActiveTab == TabDiff {
-					if tabOffset >= 2 && tabOffset <= 12 {
-						m.DiffView.DiffMode = "unified"
-						m.DiffView.UpdateContent()
-					} else if tabOffset >= 13 && tabOffset <= 24 {
-						m.DiffView.DiffMode = "path"
-						m.DiffView.UpdateContent()
-					} else if tabOffset >= 25 && tabOffset <= 34 {
-						m.DiffView.DiffMode = "cli"
-						m.DiffView.UpdateContent()
-					} else if tabOffset >= 35 && tabOffset <= 56 {
-						m.VsLive = !m.VsLive
-						m.DiffView.VsLive = m.VsLive
-						m.updateActiveTabContent()
-						if m.VsLive && !m.isFetchingLiveCfg {
-							m.isFetchingLiveCfg = true
-							return m, fetchLiveConfigCmd(m.SRLClient)
+			switch m.ActiveTab {
+			case TabDiff:
+				for _, chip := range m.DiffView.ControlHitRanges() {
+					if innerX >= chip.StartX && innerX < chip.EndX {
+						switch chip.Label {
+						case "unified":
+							m.DiffView.DiffMode = "unified"
+							m.DiffView.ResetScroll()
+							m.DiffView.UpdateContent()
+							return m, nil
+						case "path":
+							m.DiffView.DiffMode = "path"
+							m.DiffView.ResetScroll()
+							m.DiffView.UpdateContent()
+							return m, nil
+						case "cli":
+							m.DiffView.DiffMode = "cli"
+							m.DiffView.ResetScroll()
+							m.DiffView.UpdateContent()
+							return m, nil
+						case "live":
+							return m, m.toggleVsLive()
 						}
-						return m, nil
 					}
-				} else if m.ActiveTab == TabConfig {
-					cliEnd := 17
-					if m.ConfigView.FormatMode == "cli" {
-						cliEnd = 19
+				}
+			case TabConfig:
+				for _, chip := range m.ConfigView.ControlHitRanges() {
+					if innerX >= chip.StartX && innerX < chip.EndX {
+						switch chip.Label {
+						case "cli":
+							m.ConfigView.FormatMode = "cli"
+							m.ConfigView.ResetScroll()
+							m.ConfigView.UpdateContent()
+							return m, nil
+						case "json":
+							m.ConfigView.FormatMode = "json"
+							m.ConfigView.ResetScroll()
+							m.ConfigView.UpdateContent()
+							return m, nil
+						}
 					}
-					if tabOffset >= 2 && tabOffset <= cliEnd {
-						m.ConfigView.FormatMode = "cli"
-						m.ConfigView.UpdateContent()
-					} else if tabOffset > cliEnd && tabOffset <= 45 {
-						m.ConfigView.FormatMode = "json"
-						m.ConfigView.UpdateContent()
+				}
+			case TabBlame:
+				for _, chip := range m.BlameView.ControlHitRanges() {
+					if innerX >= chip.StartX && innerX < chip.EndX {
+						switch chip.Label {
+						case "attribution":
+							m.BlameView.ViewMode = "attribution"
+							m.BlameView.ResetScroll()
+							m.BlameView.UpdateContent()
+							return m, nil
+						case "analytics":
+							m.BlameView.ViewMode = "analytics"
+							m.BlameView.ResetScroll()
+							m.BlameView.UpdateContent()
+							return m, nil
+						case "wrap":
+							m.BlameView.WrapLines = !m.BlameView.WrapLines
+							m.BlameView.ResetScroll()
+							m.BlameView.UpdateContent()
+							return m, nil
+						}
 					}
 				}
 			}
 			return m, nil
 		}
+
+		// Detail Content Area (Y >= 4 && Y <= m.Height-2)
+		m.setFocusedPane(PaneDetail)
+		if m.ActiveTab == TabBlame && m.BlameView.ViewMode == "attribution" && msg.Y <= m.Height-3 {
+			vpRow := (msg.Y - 3) - m.BlameView.HeaderRows()
+			if vpRow >= 0 {
+				if entry := m.BlameView.EntryAtRow(vpRow); entry != nil {
+					for i := range m.BlameView.Entries {
+						if &m.BlameView.Entries[i] == entry {
+							m.BlameView.SelectedLine = i
+							m.BlameView.lastRendered = ""
+							m.BlameView.UpdateContent()
+							break
+						}
+					}
+				}
+			}
+		}
+		return m, nil
 	}
 
 	return m, nil
 }
 
 func (m AppModel) handleModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "T" {
+	if msg.String() == "T" && m.ActiveModal != ModalTheme {
 		canCycleTheme := m.ActiveModal == ModalHelp ||
 			m.ActiveModal == ModalRestore ||
 			(m.ActiveModal == ModalCherryPick && !m.CherryPickModal.UseCustom) ||
-			(m.ActiveModal == ModalExport && m.ExportModal.Format == "startup") ||
+			(m.ActiveModal == ModalExport && !m.ExportModal.IsEditingPath()) ||
 			(m.ActiveModal == ModalRemote && m.RemoteModal.FocusedIndex != 0)
 		if canCycleTheme {
 			NextTheme()
@@ -1111,6 +1469,24 @@ func (m AppModel) handleModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch m.ActiveModal {
+	case ModalTheme:
+		var changed, confirmed, close bool
+		m.ThemeModal, changed, confirmed, close = m.ThemeModal.Update(msg)
+		if changed {
+			m.RefreshTheme()
+		}
+		if close {
+			m.ActiveModal = ModalNone
+			if confirmed {
+				t := CurrentTheme()
+				seq := m.setNotification(
+					fmt.Sprintf("Theme: %s", t.DisplayName),
+					lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
+				)
+				return m, clearNotificationCmd(seq)
+			}
+		}
+
 	case ModalRestore:
 		var confirmed, close bool
 		m.RestoreModal, confirmed, close = m.RestoreModal.Update(msg)
@@ -1143,7 +1519,7 @@ func (m AppModel) handleModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				m.setNotification(
 					notifyStr,
-					lipgloss.NewStyle().Background(ColorWarning).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
+					lipgloss.NewStyle().Background(ColorWarningBg).Foreground(ColorOnWarning).Bold(true).Padding(0, 1),
 				)
 				sha := m.CherryPickModal.Commit.FullSHA
 				return m, performCherryPickCmd(m.Restorer, sha, selectedSubtrees...)
@@ -1172,28 +1548,29 @@ func (m AppModel) handleModalKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if close {
 			m.ActiveModal = ModalNone
 			if save {
+				var seq int
 				if err := m.GitBackend.SaveRemoteConfig(m.RemoteModal.Config); err != nil {
-					m.setNotification(
+					seq = m.setNotification(
 						fmt.Sprintf("Failed to save remote config: %v", err),
 						lipgloss.NewStyle().Background(ColorDangerBg).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 					)
 				} else {
-					m.setNotification(
+					seq = m.setNotification(
 						"Saved Remote Git configuration",
 						lipgloss.NewStyle().Background(ColorSuccessBg).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 					)
 				}
-				return m, clearNotificationCmd()
+				return m, clearNotificationCmd(seq)
 			}
 		}
 		if pushNow {
 			if err := m.GitBackend.SaveRemoteConfig(m.RemoteModal.Config); err != nil {
 				m.ActiveModal = ModalNone
-				m.setNotification(
+				seq := m.setNotification(
 					fmt.Sprintf("Failed to save remote config: %v", err),
 					lipgloss.NewStyle().Background(ColorDangerBg).Foreground(ColorOnAccent).Bold(true).Padding(0, 1),
 				)
-				return m, clearNotificationCmd()
+				return m, clearNotificationCmd(seq)
 			}
 			m.ActiveModal = ModalNone
 			m.setNotification(
@@ -1315,9 +1692,11 @@ func (m *AppModel) resizeLayout(width, height int) {
 	m.RemoteModal.Height = height
 	m.HelpModal.Width = width
 	m.HelpModal.Height = height
+	m.ThemeModal.Width = width
+	m.ThemeModal.Height = height
 
+	// Only resize components and re-wrap viewports — never re-query Git on resize!
 	m.syncPaneHeights()
-	m.refreshTimeline()
 }
 
 func (m *AppModel) refreshTimeline() {
@@ -1330,19 +1709,69 @@ func (m *AppModel) refreshTimeline() {
 		filteredCommits = allCommits
 	}
 
+	if m.BaseCommitSHA != "" && m.baseCommit == nil {
+		for _, c := range allCommits {
+			if c.FullSHA == m.BaseCommitSHA {
+				bc := c
+				m.baseCommit = &bc
+				break
+			}
+		}
+	}
+
+	m.TimelineView.FilterQuery = filterQuery
+	m.TimelineView.HeadSHA = m.lastHeadSHA
+	m.TimelineView.BaseCommitSHA = m.BaseCommitSHA
 	m.FilterBar.SetCounts(len(filteredCommits), len(allCommits))
 	m.TimelineView.SetCommits(filteredCommits)
 	m.updateActiveTabContent()
 }
 
-// updateActiveTabContent only updates the currently active tab.
+// updateActiveTabContent updates only the active detail tab, clearing all detail views
+// when no commit matches and resetting scroll only when commit, tab, or compare target changes.
 func (m *AppModel) updateActiveTabContent() {
+	filterQuery := m.FilterBar.Value()
+	m.TimelineView.FilterQuery = filterQuery
+	m.TimelineView.HeadSHA = m.lastHeadSHA
+	m.TimelineView.BaseCommitSHA = m.BaseCommitSHA
+	m.BlameView.FilterQuery = filterQuery
+
 	selected := m.TimelineView.SelectedCommit()
 	if selected == nil {
+		msg := "No commits available."
+		if q := strings.TrimSpace(filterQuery); q != "" {
+			msg = fmt.Sprintf("No commits match filter '%s'. Press Esc to clear.", q)
+		}
+		m.DiffView.Clear(msg)
+		m.ConfigView.Clear(msg)
+		m.BlameView.Clear(msg)
+		m.lastDetailCommitSHA = ""
+		m.lastCompareKey = ""
 		return
 	}
 
-	filterQuery := m.FilterBar.Value()
+	compareKey := "parent|" + filterQuery
+	if m.VsLive {
+		compareKey = "live|" + filterQuery
+	} else if m.BaseCommitSHA != "" {
+		compareKey = "base:" + m.BaseCommitSHA + "|" + filterQuery
+	}
+
+	needsReset := selected.FullSHA != m.lastDetailCommitSHA ||
+		m.ActiveTab != m.lastDetailTab ||
+		compareKey != m.lastCompareKey
+
+	m.lastDetailCommitSHA = selected.FullSHA
+	m.lastDetailTab = m.ActiveTab
+	m.lastCompareKey = compareKey
+
+	selCopy := *selected
+	m.DiffView.Commit = &selCopy
+	m.DiffView.BaseCommit = m.baseCommit
+	m.ConfigView.Commit = &selCopy
+	m.ConfigView.BaseCommit = m.baseCommit
+	m.BlameView.Commit = &selCopy
+	m.BlameView.BaseCommit = m.baseCommit
 
 	switch m.ActiveTab {
 	case TabDiff:
@@ -1354,6 +1783,9 @@ func (m *AppModel) updateActiveTabContent() {
 				currCfg = m.GitBackend.GetLatestCommitConfig()
 			}
 			prevCfg = m.GitBackend.GetConfigAtCommit(selected.FullSHA)
+		} else if m.BaseCommitSHA != "" {
+			prevCfg = m.GitBackend.GetConfigAtCommit(m.BaseCommitSHA)
+			currCfg = m.GitBackend.GetConfigAtCommit(selected.FullSHA)
 		} else {
 			parentSHA := fmt.Sprintf("%s~1", selected.FullSHA)
 			prevCfg = m.GitBackend.GetConfigAtCommit(parentSHA)
@@ -1361,63 +1793,40 @@ func (m *AppModel) updateActiveTabContent() {
 		}
 		diffRes := differ.SemanticDiff(prevCfg, currCfg, filterQuery)
 		m.DiffView.SetDiff(diffRes)
+		if needsReset {
+			m.DiffView.ResetScroll()
+		}
 
 	case TabConfig:
 		cfg := m.GitBackend.GetConfigAtCommit(selected.FullSHA)
 		m.ConfigView.SetConfig(cfg, filterQuery)
+		if needsReset {
+			m.ConfigView.ResetScroll()
+		}
 
 	case TabBlame:
 		entries := m.BlameEngine.GetBlameLinesAtCommit("cli", selected.FullSHA, filterQuery)
 		stats := m.BlameEngine.GetContributorStatsAtCommit("cli", selected.FullSHA)
 		m.BlameView.SetBlame(entries, stats)
+		if needsReset {
+			m.BlameView.ResetScroll()
+		}
 	}
 }
 
-// View renders the full application screen.
+// View renders the full application screen with exact m.Height rows and zero notification jump.
 func (m AppModel) View() string {
 	if m.Width == 0 {
 		return "Loading Timeline..."
 	}
 
-	// 1. Header Bar
+	// Row 0: Header Bar (1 row, borderless)
 	header := m.HeaderBar.View()
 
-	// 2. Filter Bar
+	// Row 1: Filter Bar (1 row, borderless)
 	filterBar := m.FilterBar.View()
 
-	// 3. Tab Navigation Bar
-	_, detailOuterWidth := computeSplitOuterWidths(m.Width)
-
-	diffTitle := "🔍 Diff View [d]"
-	configTitle := "📄 Full Config [c]"
-	blameTitle := "🕵️ Blame View [b]"
-	if detailOuterWidth < 55 {
-		diffTitle = "[d] Diff"
-		configTitle = "[c] Config"
-		blameTitle = "[b] Blame"
-	}
-
-	tabDiff := StyleTabInactive.Render(diffTitle)
-	if m.ActiveTab == TabDiff {
-		tabDiff = StyleTabActive.Render(diffTitle)
-	}
-	tabConfig := StyleTabInactive.Render(configTitle)
-	if m.ActiveTab == TabConfig {
-		tabConfig = StyleTabActive.Render(configTitle)
-	}
-	tabBlame := StyleTabInactive.Render(blameTitle)
-	if m.ActiveTab == TabBlame {
-		tabBlame = StyleTabActive.Render(blameTitle)
-	}
-
-	tabBar := PaintBarLine(
-		lipgloss.JoinHorizontal(lipgloss.Center, tabDiff, tabConfig, tabBlame),
-		detailOuterWidth,
-		ColorBackground,
-		ColorText,
-	)
-
-	// 4. Detail Panel
+	// Active Detail Panel (tabs embedded in Detail's top border)
 	var detailContent string
 	switch m.ActiveTab {
 	case TabDiff:
@@ -1428,61 +1837,37 @@ func (m AppModel) View() string {
 		detailContent = m.BlameView.View()
 	}
 
-	// 5. Main Split View: Left (Visual Timeline) | Right (Active Tab Content)
-	detailWithTabs := lipgloss.JoinVertical(
-		lipgloss.Left,
-		tabBar,
-		detailContent,
-	)
-
-	notifExtra := 0
-	if m.Notification != "" {
-		notifExtra = 1
-	}
-	timelinePaneHeight := m.Height - 8 - notifExtra
-	if timelinePaneHeight < 5 {
-		timelinePaneHeight = 5
-	}
-	splitHeight := timelinePaneHeight + 2
-	splitSep := PaintSurface("", 1, splitHeight, ColorBackground, ColorText)
-
-	mainSplit := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		m.TimelineView.View(),
-		splitSep,
-		detailWithTabs,
-	)
-
-	// 6. Notification Banner (if any)
-	var notifView string
-	if m.Notification != "" {
-		singleLineNotif := strings.ReplaceAll(strings.ReplaceAll(m.Notification, "\r\n", " "), "\n", " ")
-		notifBg := ColorPrimary
-		if c, ok := m.NotifyStyle.GetBackground().(lipgloss.Color); ok && string(c) != "" {
-			notifBg = c
+	// Rows 2 .. m.Height-2: Main Split View (exact outer height m.Height-3)
+	var mainSplit string
+	if m.Zoomed {
+		mainSplit = detailContent
+	} else {
+		paneInnerHeight := m.Height - 5
+		if paneInnerHeight < 3 {
+			paneInnerHeight = 3
 		}
-		notifFg := ColorOnAccent
-		if c, ok := m.NotifyStyle.GetForeground().(lipgloss.Color); ok && string(c) != "" {
-			notifFg = c
-		}
-		renderedNotif := m.NotifyStyle.UnsetWidth().Render(singleLineNotif)
-		notifView = PaintBarLine(renderedNotif, m.Width, notifBg, notifFg)
+		splitHeight := paneInnerHeight + 2
+		splitSep := PaintSurface("", 1, splitHeight, ColorBackground, ColorText)
+		mainSplit = lipgloss.JoinHorizontal(
+			lipgloss.Top,
+			m.TimelineView.View(),
+			splitSep,
+			detailContent,
+		)
 	}
 
-	// 7. Footer Bar
-	footer := m.FooterBar.View(m.FilterBar.Value() != "")
+	// Row m.Height-1: Footer Bar (1 row, borderless, inline toast when Notification != "")
+	footer := m.FooterBar.ViewContext(FooterContext{
+		FilterActive: m.FilterBar.Value() != "",
+		FocusedPane:  int(m.FocusedPane),
+		ActiveTab:    int(m.ActiveTab),
+		Zoomed:       m.Zoomed,
+		HasBase:      m.BaseCommitSHA != "",
+		ToastText:    m.Notification,
+		ToastKind:    m.notifyKind,
+	})
 
-	// Combine all sections cleanly without empty newline gaps
-	var sections []string
-	sections = append(sections, header)
-	sections = append(sections, filterBar)
-	if notifView != "" {
-		sections = append(sections, notifView)
-	}
-	sections = append(sections, mainSplit)
-	sections = append(sections, footer)
-
-	baseScreen := lipgloss.JoinVertical(lipgloss.Left, sections...)
+	baseScreen := lipgloss.JoinVertical(lipgloss.Left, header, filterBar, mainSplit, footer)
 
 	// Overlay Modals if active
 	switch m.ActiveModal {
@@ -1496,6 +1881,8 @@ func (m AppModel) View() string {
 		return PaintSurface(m.RemoteModal.View(), m.Width, m.Height, ColorBackground, ColorText)
 	case ModalHelp:
 		return PaintSurface(m.HelpModal.View(), m.Width, m.Height, ColorBackground, ColorText)
+	case ModalTheme:
+		return PaintSurface(m.ThemeModal.View(), m.Width, m.Height, ColorBackground, ColorText)
 	}
 
 	return PaintSurface(baseScreen, m.Width, m.Height, ColorBackground, ColorText)
@@ -1508,7 +1895,6 @@ func RunTUI(initialFilter string) error {
 		tea.WithOutput(lipgloss.DefaultRenderer().Output()),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
-		tea.WithMouseAllMotion(),
 	)
 	_, err := p.Run()
 	return err
