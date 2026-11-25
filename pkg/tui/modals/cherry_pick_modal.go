@@ -778,7 +778,7 @@ func (m CherryPickModalModel) renderLayout() (content string, innerW, vPad, hPad
 				"%s %s %s",
 				textStyle.Render("Target Commit:"),
 				lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Render(shaStr),
-				textStyle.Render(fmt.Sprintf("(%s)", truncateDisplay(m.Commit.Message, innerW-28))),
+				textStyle.Render(fmt.Sprintf("(%s)", truncateDisplay(cleanCommitSummary(m.Commit), innerW-28))),
 			),
 			innerW,
 			ColorSurface,
@@ -1016,15 +1016,15 @@ func (m CherryPickModalModel) renderLayout() (content string, innerW, vPad, hPad
 		ColorText,
 	)
 
-	footerText := "[Space/x] Select  |  [a] All  |  [Enter] Expand/Apply  |  [A] Apply  |  [Tab] Custom/Buttons  |  [Esc] Cancel"
-	if innerW < 76 {
-		footerText = "[Space/x] Sel | [a] All | [Enter] Exp/Apply | [A] Apply | [Tab] Next | [Esc] No"
+	footerItems := []string{"Space/x Select", "a All", "Enter Expand/Apply", "A Apply", "Tab Focus", "Esc Cancel"}
+	if innerW < 78 {
+		footerItems = []string{"Space/x Sel", "a All", "Enter Expand", "A Apply", "Tab Focus", "Esc Cancel"}
 	}
-	footer := PaintBarLine(
-		lipgloss.NewStyle().Foreground(ColorMuted).Render(footerText),
+	footer := renderModalFooter(
+		footerItems,
+		"Space Sel · Enter OK · Esc",
 		innerW,
-		ColorSurface,
-		ColorMuted,
+		!ultraCompact,
 	)
 
 	// Assemble lines while tracking exact vertical coordinates for mouse hit-testing

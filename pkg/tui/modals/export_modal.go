@@ -142,7 +142,7 @@ func (m ExportModalModel) View() string {
 
 	details := PaintBarLine(
 		lipgloss.NewStyle().Foreground(ColorText).Render(
-			fmt.Sprintf("Revision: %s (%s)", shortSHA, truncateDisplay(m.Commit.Message, innerW-22)),
+			fmt.Sprintf("Revision: %s (%s)", shortSHA, truncateDisplay(cleanCommitSummary(m.Commit), innerW-22)),
 		),
 		innerW,
 		ColorSurface,
@@ -247,15 +247,11 @@ func (m ExportModalModel) View() string {
 		ColorText,
 	)
 
-	footerText := "[Tab] Switch Field  |  [1/2/3/↑/↓] Format  |  [Enter] Export  |  [Esc] Cancel"
-	if innerW < 58 {
-		footerText = "[Tab] Field | [1-3/↑↓] Fmt | [Enter] OK | [Esc] No"
-	}
-	footer := PaintBarLine(
-		lipgloss.NewStyle().Foreground(ColorMuted).Render(footerText),
+	footer := renderModalFooter(
+		[]string{"Tab Field", "1-3/↑↓ Format", "Enter Export", "Esc Cancel"},
+		"Tab Field · Enter OK · Esc Cancel",
 		innerW,
-		ColorSurface,
-		ColorMuted,
+		!ultraCompact,
 	)
 
 	var sections []string

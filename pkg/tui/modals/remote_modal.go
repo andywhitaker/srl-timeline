@@ -268,15 +268,11 @@ func (m RemoteModalModel) View() string {
 		}
 	}
 
-	footerText := "[Tab/↑/↓/←/→] Navigate  |  [Space/Enter] Activate  |  [c] Copy Key  |  [Esc] Close"
-	if innerW < 58 {
-		footerText = "[Tab/←→] Nav | [Space/Enter] Act | [Esc] Close"
-	}
-	footer := PaintBarLine(
-		lipgloss.NewStyle().Foreground(ColorMuted).Render(footerText),
+	footer := renderModalFooter(
+		[]string{"Tab/↑↓←→ Move", "Space/Enter Select", "c Copy Key", "Esc Close"},
+		"Tab/←→ Move · Enter OK · Esc Close",
 		innerW,
-		ColorSurface,
-		ColorMuted,
+		!ultraCompact,
 	)
 
 	var sections []string

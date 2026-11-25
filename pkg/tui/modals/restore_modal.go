@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/ansi"
 
 	"timeline/pkg/models"
 )
@@ -54,12 +55,302 @@ func (m *RestoreModalModel) SetImpact(impact models.SemanticDiffResult) {
 	m.HasImpact = true
 }
 
-func (m RestoreModalModel) impactCounts() (added, modified, deleted int) {
+// renderModalFooter formats concise keybinding hints so they fit cleanly within innerW
+// without clipping mid-word. When allowWrap is true and all items do not fit on one line,
+// items wrap cleanly across lines at item boundaries (never splitting inside an item).
+// When allowWrap is false (e.g. ultra-compact terminals <= 14 rows), compactFallback is
+// used if needed so vertical height stays strictly bounded.
+func renderModalFooter(items []string, compactFallback string, innerW int, allowWrap bool) string {
+	style := lipgloss.NewStyle().Foreground(ColorMuted)
+	const sep = " · "
+
+	joined := strings.Join(items, sep)
+	if innerW <= 0 || ansi.PrintableRuneWidth(joined) <= innerW {
+		return PaintBarLine(style.Render(joined), innerW, ColorSurface, ColorMuted)
+	}
+
+	if !allowWrap {
+		text := compactFallback
+		if text == "" {
+			text = joined
+		}
+		if ansi.PrintableRuneWidth(text) <= innerW {
+			return PaintBarLine(style.Render(text), innerW, ColorSurface, ColorMuted)
+		}
+		fitted := ""
+		for _, item := range items {
+			cand := item
+			if fitted != "" {
+				cand = fitted + sep + item
+			}
+			if ansi.PrintableRuneWidth(cand) <= innerW {
+				fitted = cand
+			} else {
+				break
+			}
+		}
+		if fitted != "" {
+			return PaintBarLine(style.Render(fitted), innerW, ColorSurface, ColorMuted)
+		}
+		return PaintBarLine(style.Render(truncateDisplay(text, innerW)), innerW, ColorSurface, ColorMuted)
+	}
+
+	var lines []string
+	cur := ""
+	for _, item := range items {
+		if cur == "" {
+			cur = item
+			continue
+		}
+		cand := cur + sep + item
+		if ansi.PrintableRuneWidth(cand) <= innerW {
+			cur = cand
+		} else {
+			lines = append(lines, PaintBarLine(style.Render(cur), innerW, ColorSurface, ColorMuted))
+			cur = item
+		}
+	}
+	if cur != "" {
+		lines = append(lines, PaintBarLine(style.Render(cur), innerW, ColorSurface, ColorMuted))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// cleanCommitSummary returns a clean human-readable commit summary by preferring explicit
+// user comments (stripping raw daemon/gitbackend boilerplate prefixes) or Commit.SummaryScope.
+func cleanCommitSummary(c models.TimelineCommit) string {
+	cleanMsg := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(c.Message, "\r", ""), "\n", " "))
+	scope := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(c.SummaryScope, "\r", ""), "\n", " "))
+
+	if cleanMsg != "" {
+		lower := strings.ToLower(cleanMsg)
+		if strings.HasPrefix(lower, "config commit by ") {
+			if idx := strings.Index(cleanMsg, " — "); idx >= 0 {
+				if comment := strings.TrimSpace(cleanMsg[idx+len(" — "):]); comment != "" {
+					return comment
+				}
+			}
+			if scope != "" {
+				return scope
+			}
+			rest := strings.TrimSpace(cleanMsg[len("config commit by "):])
+			if sp := strings.IndexByte(rest, ' '); sp >= 0 {
+				if tail := strings.TrimSpace(rest[sp+1:]); tail != "" {
+					return tail
+				}
+			}
+			return "Configuration update"
+		}
+		switch lower {
+		case "configuration change",
+			"config change",
+			"auto-captured configuration change",
+			"initial baseline configuration":
+			if scope != "" {
+				return scope
+			}
+		}
+		return cleanMsg
+	}
+
+	if scope != "" {
+		return scope
+	}
+	return "Configuration update"
+}
+
+func markXPathAncestors(path string, ancestors map[string]bool) {
+	trimmed := strings.TrimSpace(path)
+	if len(trimmed) <= 1 {
+		return
+	}
+	bracketDepth := 0
+	for i := 1; i < len(trimmed); i++ {
+		switch trimmed[i] {
+		case '[':
+			if bracketDepth == 0 {
+				ancestors[trimmed[:i]] = true
+			}
+			bracketDepth++
+		case ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+		case '/':
+			if bracketDepth == 0 {
+				ancestors[trimmed[:i]] = true
+			}
+		}
+	}
+}
+
+// deduplicatedLeafChanges filters out parent container/list rows whose child leaf paths
+// are also present in changes, and removes exact (path, diffType) duplicates while
+// preserving original order.
+func deduplicatedLeafChanges(changes []models.PathChange) []models.PathChange {
+	if len(changes) == 0 {
+		return nil
+	}
+	ancestors := make(map[string]bool, len(changes)*2)
+	for _, ch := range changes {
+		markXPathAncestors(ch.Path, ancestors)
+	}
+
+	type dedupKey struct {
+		path     string
+		diffType models.DiffType
+	}
+	seen := make(map[dedupKey]bool, len(changes))
+	leaves := make([]models.PathChange, 0, len(changes))
+	for _, ch := range changes {
+		cleanPath := strings.TrimSpace(ch.Path)
+		if cleanPath == "" || ancestors[cleanPath] {
+			continue
+		}
+		key := dedupKey{path: cleanPath, diffType: ch.DiffType}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		leaves = append(leaves, ch)
+	}
+	return leaves
+}
+
+// splitXPathSegments splits an XPath into top-level slash-delimited segments while
+// preserving slashes inside [...] brackets (e.g. interface[name=ethernet-1/1]).
+func splitXPathSegments(path string) []string {
+	var segs []string
+	var cur strings.Builder
+	bracketDepth := 0
+	for i := 0; i < len(path); i++ {
+		ch := path[i]
+		switch ch {
+		case '[':
+			bracketDepth++
+			cur.WriteByte(ch)
+		case ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+			cur.WriteByte(ch)
+		case '/':
+			if bracketDepth == 0 {
+				if cur.Len() > 0 {
+					segs = append(segs, cur.String())
+					cur.Reset()
+				}
+			} else {
+				cur.WriteByte(ch)
+			}
+		default:
+			cur.WriteByte(ch)
+		}
+	}
+	if cur.Len() > 0 {
+		segs = append(segs, cur.String())
+	}
+	return segs
+}
+
+// truncateXPath truncates an XPath to fit within maxW visual columns while preserving
+// the root subsystem and as many unique trailing leaf/entry segments as possible
+// (e.g. "/acl/.../entry[sequence-id=20]/action/drop").
+func truncateXPath(path string, maxW int) string {
+	clean := strings.ReplaceAll(path, "\r", "")
+	clean = strings.ReplaceAll(clean, "\n", " ")
+	clean = strings.ReplaceAll(clean, "\t", " ")
+	clean = strings.TrimSpace(clean)
+	if maxW <= 0 || ansi.PrintableRuneWidth(clean) <= maxW {
+		return clean
+	}
+	if maxW <= 3 {
+		return truncateDisplay(clean, maxW)
+	}
+
+	segs := splitXPathSegments(clean)
+	if !strings.HasPrefix(clean, "/") || len(segs) < 2 {
+		return truncateDisplay(clean, maxW)
+	}
+
+	fitWithRoot := func(root string) (best string, tailCount int) {
+		prefix := root + "/.../"
+		prefixW := ansi.PrintableRuneWidth(prefix)
+		minStart := 2
+		if root != "/"+segs[0] {
+			minStart = 1
+		}
+		var suffix string
+		for k := len(segs) - 1; k >= minStart; k-- {
+			candSuffix := segs[k]
+			if suffix != "" {
+				candSuffix = segs[k] + "/" + suffix
+			}
+			if prefixW+ansi.PrintableRuneWidth(candSuffix) <= maxW {
+				suffix = candSuffix
+				tailCount = len(segs) - k
+			} else {
+				break
+			}
+		}
+		if tailCount > 0 {
+			return prefix + suffix, tailCount
+		}
+		return "", 0
+	}
+
+	fullRoot := "/" + segs[0]
+	best, bestCount := fitWithRoot(fullRoot)
+
+	if bIdx := strings.IndexByte(segs[0], '['); bIdx > 0 {
+		shortRoot := "/" + segs[0][:bIdx]
+		if cand, count := fitWithRoot(shortRoot); count > bestCount {
+			best, bestCount = cand, count
+		}
+	}
+
+	if best != "" {
+		return best
+	}
+
+	// Fallback when even "<root>/.../<lastSeg>" exceeds maxW: preserve root prefix + "..." + trailing tail.
+	rootPrefix := fullRoot
+	if bIdx := strings.IndexByte(segs[0], '['); bIdx > 0 {
+		rootPrefix = "/" + segs[0][:bIdx]
+	}
+	rootPrefix += "/"
+	const dots = "..."
+	if maxHead := maxW / 3; ansi.PrintableRuneWidth(rootPrefix) > maxHead {
+		if maxHead < 1 {
+			maxHead = 1
+		}
+		rootPrefix = string([]rune(rootPrefix)[:maxHead])
+	}
+	headW := ansi.PrintableRuneWidth(rootPrefix)
+	tailBudget := maxW - headW - len(dots)
+	if tailBudget <= 0 {
+		return truncateDisplay(clean, maxW)
+	}
+	runes := []rune(clean)
+	tailW := 0
+	startIdx := len(runes)
+	for startIdx > 0 {
+		rw := ansi.PrintableRuneWidth(string(runes[startIdx-1]))
+		if tailW+rw > tailBudget {
+			break
+		}
+		tailW += rw
+		startIdx--
+	}
+	return rootPrefix + dots + string(runes[startIdx:])
+}
+
+func (m RestoreModalModel) impactCounts(leaves []models.PathChange) (added, modified, deleted int) {
 	added = m.Impact.AddedCount
 	modified = m.Impact.ModifiedCount
 	deleted = m.Impact.DeletedCount
-	if added == 0 && modified == 0 && deleted == 0 && len(m.Impact.Changes) > 0 {
-		for _, ch := range m.Impact.Changes {
+	if added == 0 && modified == 0 && deleted == 0 && len(leaves) > 0 {
+		for _, ch := range leaves {
 			switch ch.DiffType {
 			case models.DiffAdded:
 				added++
@@ -114,13 +405,14 @@ func (m RestoreModalModel) View() string {
 		)
 	}
 	detailLines = append(detailLines,
-		PaintBarLine(fmt.Sprintf("%s %s", lblStyle.Render("Summary:      "), valStyle.Render(truncateDisplay(m.Commit.Message, valMaxW))), innerW, ColorSurface, ColorText),
+		PaintBarLine(fmt.Sprintf("%s %s", lblStyle.Render("Summary:      "), valStyle.Render(truncateDisplay(cleanCommitSummary(m.Commit), valMaxW))), innerW, ColorSurface, ColorText),
 	)
 
 	var impactLines []string
 	if m.HasImpact {
-		added, modified, deleted := m.impactCounts()
-		hasDiff := m.Impact.HasChanges || added > 0 || modified > 0 || deleted > 0 || len(m.Impact.Changes) > 0
+		leafChanges := deduplicatedLeafChanges(m.Impact.Changes)
+		added, modified, deleted := m.impactCounts(leafChanges)
+		hasDiff := m.Impact.HasChanges || added > 0 || modified > 0 || deleted > 0 || len(leafChanges) > 0
 		if !hasDiff {
 			impactLines = append(impactLines, PaintBarLine(
 				lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true).Render("● No differences vs running config"),
@@ -155,8 +447,13 @@ func (m RestoreModalModel) View() string {
 				}
 			}
 
+			pathBudget := innerW - 4
+			if pathBudget < 4 {
+				pathBudget = 4
+			}
+
 			shown := 0
-			for i, ch := range m.Impact.Changes {
+			for i, ch := range leafChanges {
 				if i >= maxPaths {
 					break
 				}
@@ -169,13 +466,17 @@ func (m RestoreModalModel) View() string {
 				default:
 					prefix = lipgloss.NewStyle().Bold(true).Foreground(ColorWarning).Render("  ~ ")
 				}
-				pathText := truncateDisplay(ch.Path, innerW-5)
+				pathText := truncateXPath(ch.Path, pathBudget)
 				impactLines = append(impactLines, PaintBarLine(prefix+valStyle.Render(pathText), innerW, ColorSurface, ColorText))
 				shown++
 			}
-			if remaining := len(m.Impact.Changes) - shown; remaining > 0 && !ultraCompact {
+			if remaining := len(leafChanges) - shown; remaining > 0 && !ultraCompact {
+				moreText := fmt.Sprintf("  … and %d more affected paths", remaining)
+				if remaining == 1 {
+					moreText = "  … and 1 more affected path"
+				}
 				impactLines = append(impactLines, PaintBarLine(
-					lipgloss.NewStyle().Foreground(ColorMuted).Render(fmt.Sprintf("  … and %d more affected paths", remaining)),
+					lipgloss.NewStyle().Foreground(ColorMuted).Render(moreText),
 					innerW,
 					ColorSurface,
 					ColorMuted,
@@ -217,15 +518,11 @@ func (m RestoreModalModel) View() string {
 		ColorText,
 	)
 
-	footerText := "[←/→/Tab] Select  |  [Enter/Space] Activate  |  [y] Confirm  |  [n/Esc] Cancel"
-	if innerW < 56 {
-		footerText = "[←/→/Tab] Pick | [Enter] OK | [y] Yes | [Esc] No"
-	}
-	footer := PaintBarLine(
-		lipgloss.NewStyle().Foreground(ColorMuted).Render(footerText),
+	footer := renderModalFooter(
+		[]string{"←/→/Tab Switch", "Enter Select", "y Confirm", "n/Esc Cancel"},
+		"←/→ Pick · Enter OK · y/Esc",
 		innerW,
-		ColorSurface,
-		ColorMuted,
+		!ultraCompact,
 	)
 
 	var sections []string
