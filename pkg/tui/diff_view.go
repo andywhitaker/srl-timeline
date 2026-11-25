@@ -14,16 +14,18 @@ import (
 
 // DiffViewModel handles the syntax-highlighted semantic diff viewport.
 type DiffViewModel struct {
-	DiffResult models.SemanticDiffResult
-	DiffMode   string // "unified", "path", "cli"
-	VsLive     bool
-	Zoomed     bool
-	Commit     *models.TimelineCommit
-	BaseCommit *models.TimelineCommit
-	Viewport   viewport.Model
-	Width      int
-	Height     int
-	IsFocused  bool
+	DiffResult  models.SemanticDiffResult
+	DiffMode    string // "unified", "path", "cli"
+	VsLive      bool
+	Zoomed      bool
+	Commit      *models.TimelineCommit
+	ParentSHA   string
+	BaseCommit  *models.TimelineCommit
+	FilterQuery string
+	Viewport    viewport.Model
+	Width       int
+	Height      int
+	IsFocused   bool
 
 	emptyMsg string
 }
@@ -87,7 +89,9 @@ func (m *DiffViewModel) ResetScroll() {
 func (m *DiffViewModel) Clear(message string) {
 	m.DiffResult = models.SemanticDiffResult{}
 	m.Commit = nil
+	m.ParentSHA = ""
 	m.BaseCommit = nil
+	m.FilterQuery = ""
 	m.emptyMsg = strings.TrimSpace(message)
 	m.Viewport.SetYOffset(0)
 	m.UpdateContent()
@@ -122,10 +126,36 @@ func (m *DiffViewModel) UpdateContent() {
 	}
 
 	if !m.DiffResult.HasChanges {
+		var emptyText string
+		commitID := ""
+		if m.Commit != nil {
+			commitID = strings.TrimSpace(m.Commit.CommitID)
+		}
+		fq := strings.TrimSpace(m.FilterQuery)
+		switch {
+		case m.VsLive:
+			if commitID != "" {
+				emptyText = fmt.Sprintf("  %s Revision %s matches the live running configuration", GlyphCheck, commitID)
+			} else {
+				emptyText = fmt.Sprintf("  %s Matches the live running configuration", GlyphCheck)
+			}
+		case m.BaseCommit != nil:
+			baseID := strings.TrimSpace(m.BaseCommit.CommitID)
+			if commitID != "" {
+				emptyText = fmt.Sprintf("  %s No differences between BASE %s and %s", GlyphCheck, baseID, commitID)
+			} else {
+				emptyText = fmt.Sprintf("  %s No differences vs BASE %s", GlyphCheck, baseID)
+			}
+		default:
+			emptyText = fmt.Sprintf("  %s No configuration changes vs previous commit", GlyphCheck)
+		}
+		if fq != "" {
+			emptyText += fmt.Sprintf(" (filter: '%s')", fq)
+		}
 		msg := lipgloss.NewStyle().
 			Foreground(ColorSuccess).
 			Bold(true).
-			Render("  " + GlyphCheck + " No configuration changes for this revision / filter")
+			Render(emptyText)
 		m.Viewport.SetContent(PaintLine("", wrapW, ColorPanel, ColorText) + "\n" + PaintLine(msg, wrapW, ColorPanel, ColorSuccess))
 		m.Viewport.SetYOffset(0)
 		return
@@ -343,14 +373,17 @@ func formatPathChangeValue(c models.PathChange, bg lipgloss.Color) string {
 }
 
 type toolbarPillSpec struct {
-	label    string
-	text     string
-	active   bool
-	warning  bool
-	padH     int
-	fixedPad bool
+	label           string
+	text            string
+	active          bool
+	warning         bool
+	isToggle        bool
+	separatorBefore bool
+	padH            int
+	fixedPad        bool
 }
 
+const wideToolbarThreshold = 62
 const compactToolbarThreshold = 54
 const tightToolbarPadThreshold = 40
 
@@ -361,14 +394,21 @@ func buildToolbarLine(specs []toolbarPillSpec, focused bool, rightStatus, rightF
 
 	var b strings.Builder
 	sp := lipgloss.NewStyle().Background(ColorSurface).Render(" ")
+	divSep := lipgloss.NewStyle().Background(ColorSurface).Foreground(ColorBorder).Render(" " + GlyphPipe + " ")
+	divSepW := lipgloss.Width(divSep)
 	b.WriteString(sp)
 	cursorX := 1
 
 	chips := make([]HitChip, 0, len(specs))
 	for i, spec := range specs {
 		if i > 0 {
-			b.WriteString(sp)
-			cursorX++
+			if spec.separatorBefore {
+				b.WriteString(divSep)
+				cursorX += divSepW
+			} else {
+				b.WriteString(sp)
+				cursorX++
+			}
 		}
 		padH := spec.padH
 		if padH == 0 && !spec.fixedPad {
@@ -378,6 +418,12 @@ func buildToolbarLine(specs []toolbarPillSpec, focused bool, rightStatus, rightF
 		switch {
 		case spec.warning && spec.active:
 			st = st.Background(ColorWarningBg).Foreground(ColorOnWarning).Bold(true)
+		case spec.isToggle && !spec.active:
+			if focused {
+				st = st.Background(ColorSurface).Foreground(ColorMuted)
+			} else {
+				st = st.Background(ColorSurface).Foreground(ColorTextDim)
+			}
 		case spec.active && focused:
 			st = st.Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true)
 		case spec.active && !focused:
@@ -427,34 +473,34 @@ func buildToolbarLine(specs []toolbarPillSpec, focused bool, rightStatus, rightF
 
 func (m DiffViewModel) buildToolbar(innerW int) (string, []HitChip) {
 	compact := innerW < compactToolbarThreshold
+	toggleGlyph := GlyphPaused // ○ when off
+	if m.VsLive {
+		toggleGlyph = GlyphLive // ● when on
+	}
+
 	var specs []toolbarPillSpec
 	if compact {
 		padH := 1
 		if innerW < tightToolbarPadThreshold {
 			padH = 0
 		}
-		liveText := "4:Live"
-		if m.VsLive {
-			liveText = GlyphLive + " Live" // exact same 6-col width as "4:Live"
-		}
+		liveText := "4:" + toggleGlyph + "Run"
 		specs = []toolbarPillSpec{
 			{label: "unified", text: "1:Uni", active: m.DiffMode == "unified", padH: padH, fixedPad: true},
 			{label: "path", text: "2:Path", active: m.DiffMode == "path", padH: padH, fixedPad: true},
 			{label: "cli", text: "3:CLI", active: m.DiffMode == "cli" || m.DiffMode == "", padH: padH, fixedPad: true},
-			{label: "live", text: liveText, active: m.VsLive, warning: true, padH: padH, fixedPad: true},
+			{label: "live", text: liveText, active: m.VsLive, warning: true, isToggle: true, separatorBefore: true, padH: padH, fixedPad: true},
 		}
 	} else {
-		liveText := "[4] Live"
-		livePad := 1
-		if m.VsLive {
-			liveText = GlyphLive + " Live"
-			livePad = 2 // exact same total width (10 cols) as "[4] Live" with pad 1!
+		liveText := "[4] " + toggleGlyph + " Running"
+		if innerW >= wideToolbarThreshold {
+			liveText = "[4] " + toggleGlyph + " vs Running"
 		}
 		specs = []toolbarPillSpec{
 			{label: "unified", text: "[1] Unified", active: m.DiffMode == "unified", padH: 1},
 			{label: "path", text: "[2] Path", active: m.DiffMode == "path", padH: 1},
 			{label: "cli", text: "[3] CLI", active: m.DiffMode == "cli" || m.DiffMode == "", padH: 1},
-			{label: "live", text: liveText, active: m.VsLive, warning: true, padH: livePad, fixedPad: true},
+			{label: "live", text: liveText, active: m.VsLive, warning: true, isToggle: true, separatorBefore: true, padH: 1, fixedPad: true},
 		}
 	}
 
@@ -488,7 +534,7 @@ func (m DiffViewModel) View() string {
 	sections = append(sections, controlsBar)
 
 	if m.hasContextStrip() {
-		sections = append(sections, renderCommitContextStrip(m.Commit, m.BaseCommit, m.VsLive, &m.DiffResult, innerW))
+		sections = append(sections, renderDiffContextStrip(m.Commit, m.BaseCommit, m.ParentSHA, m.VsLive, &m.DiffResult, innerW))
 	}
 
 	vpH := innerH - len(sections)
@@ -627,6 +673,10 @@ func DetailTabHitRanges(outerW int, zoomed bool) []HitChip {
 // formatComparisonStatTokens computes and styles actual +A ~M -D leaf totals from diffRes
 // for A↔B comparison and VsLive modes.
 func formatComparisonStatTokens(diffRes models.SemanticDiffResult, bg lipgloss.Color) string {
+	return formatComparisonStatTokensWithLabel(diffRes, bg, GlyphCheck+" Identical")
+}
+
+func formatComparisonStatTokensWithLabel(diffRes models.SemanticDiffResult, bg lipgloss.Color, identicalLabel string) string {
 	added, modified, deleted := diffRes.AddedCount, diffRes.ModifiedCount, diffRes.DeletedCount
 	if added == 0 && modified == 0 && deleted == 0 && len(diffRes.Changes) > 0 {
 		for _, c := range filterRedundantPathChanges(diffRes.Changes) {
@@ -653,13 +703,123 @@ func formatComparisonStatTokens(diffRes models.SemanticDiffResult, bg lipgloss.C
 	if len(parts) > 0 {
 		return formatDiffStatTokens(strings.Join(parts, " "), bg)
 	}
-	if !diffRes.HasChanges {
-		return lipgloss.NewStyle().Foreground(ColorSuccess).Background(bg).Render(GlyphCheck + " Identical")
+	if !diffRes.HasChanges && identicalLabel != "" {
+		return lipgloss.NewStyle().Foreground(ColorSuccess).Background(bg).Render(identicalLabel)
 	}
 	return ""
 }
 
-// renderCommitContextStrip renders a compact 1-row metadata summary strip below the Detail toolbar.
+// renderDiffContextStrip renders the explicit comparison-endpoint context strip for DiffView,
+// showing whether the user is comparing Prev -> Commit (or Initial -> Commit),
+// Commit -> ● RUNNING CONFIG, or BASE -> Commit.
+func renderDiffContextStrip(commit, baseCommit *models.TimelineCommit, parentSHA string, vsLive bool, diffRes *models.SemanticDiffResult, width int) string {
+	if width < 1 {
+		return ""
+	}
+	bg := ColorBackground
+	sp := lipgloss.NewStyle().Background(bg).Render(" ")
+	sep := lipgloss.NewStyle().Foreground(ColorTextDim).Background(bg).Render(" · ")
+	arrow := lipgloss.NewStyle().Foreground(ColorTextDim).Background(bg).Render(" → ")
+
+	var parts []string
+	usedW := 1 // leading space
+
+	appendPart := func(sepStr, seg string) bool {
+		if seg == "" {
+			return false
+		}
+		need := lipgloss.Width(sepStr) + lipgloss.Width(seg)
+		if len(parts) > 0 && usedW+need > width-1 {
+			return false
+		}
+		if len(parts) > 0 && sepStr != "" {
+			parts = append(parts, sepStr)
+			usedW += lipgloss.Width(sepStr)
+		}
+		parts = append(parts, seg)
+		usedW += lipgloss.Width(seg)
+		return true
+	}
+
+	shaStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Background(bg)
+
+	switch {
+	case vsLive && commit != nil:
+		liveBadge := lipgloss.NewStyle().
+			Background(ColorWarningBg).
+			Foreground(ColorOnWarning).
+			Bold(true).
+			Render(" " + GlyphLive + " RUNNING CONFIG ")
+		appendPart("", shaStyle.Render(commit.CommitID)+arrow+liveBadge)
+		if diffRes != nil {
+			if stat := formatComparisonStatTokensWithLabel(*diffRes, bg, GlyphCheck+" Matches Running"); stat != "" {
+				if !appendPart(sep, stat) && !diffRes.HasChanges {
+					shortMatch := lipgloss.NewStyle().Foreground(ColorSuccess).Background(bg).Render(GlyphCheck + " Matches")
+					appendPart(sep, shortMatch)
+				}
+			}
+		}
+		if commit.Author != "" {
+			appendPart(sep, lipgloss.NewStyle().Foreground(ColorMuted).Background(bg).Render(commit.Author))
+		}
+		if !commit.Timestamp.IsZero() {
+			appendPart(sep, lipgloss.NewStyle().Foreground(ColorTextDim).Background(bg).Render(commit.Timestamp.Format("2006-01-02 15:04")))
+		}
+	case baseCommit != nil && commit != nil:
+		baseBadge := lipgloss.NewStyle().
+			Background(ColorPrimary).
+			Foreground(ColorOnAccent).
+			Bold(true).
+			Render(" BASE ")
+		appendPart("", baseBadge+sp+shaStyle.Render(baseCommit.CommitID)+arrow+shaStyle.Render(commit.CommitID))
+		if diffRes != nil {
+			if stat := formatComparisonStatTokensWithLabel(*diffRes, bg, GlyphCheck+" Identical"); stat != "" {
+				appendPart(sep, stat)
+			}
+		}
+		if commit.Author != "" {
+			appendPart(sep, lipgloss.NewStyle().Foreground(ColorMuted).Background(bg).Render(commit.Author))
+		}
+	case commit != nil:
+		if pSHA := strings.TrimSpace(parentSHA); pSHA != "" {
+			prevLabel := lipgloss.NewStyle().Foreground(ColorTextDim).Background(bg).Render("Prev ")
+			parentStyled := lipgloss.NewStyle().Foreground(ColorMuted).Background(bg).Render(pSHA)
+			appendPart("", prevLabel+parentStyled+arrow+shaStyle.Render(commit.CommitID))
+		} else {
+			initLabel := lipgloss.NewStyle().Foreground(ColorMuted).Background(bg).Render("Initial")
+			appendPart("", initLabel+arrow+shaStyle.Render(commit.CommitID))
+		}
+		if commit.Author != "" {
+			authorSt := StyleAuthorOther.Background(bg)
+			if commit.Author == "admin" || commit.Author == "root" {
+				authorSt = StyleAuthorAdmin.Background(bg)
+			}
+			appendPart(sep, authorSt.Render(commit.Author))
+		}
+		if !commit.Timestamp.IsZero() {
+			appendPart(sep, lipgloss.NewStyle().Foreground(ColorTextDim).Background(bg).Render(commit.Timestamp.Format("2006-01-02 15:04")))
+		}
+		stat := formatDiffStatTokens(commit.DiffStat, bg)
+		if stat == "" && diffRes != nil && diffRes.HasChanges {
+			stat = formatComparisonStatTokensWithLabel(*diffRes, bg, "")
+		}
+		if stat != "" {
+			appendPart(sep, stat)
+		}
+	case baseCommit != nil:
+		baseBadge := lipgloss.NewStyle().
+			Background(ColorPrimary).
+			Foreground(ColorOnAccent).
+			Bold(true).
+			Render(" BASE ")
+		appendPart("", baseBadge+sp+shaStyle.Render(baseCommit.CommitID))
+	}
+
+	return PaintBarLine(sp+strings.Join(parts, ""), width, bg, ColorText)
+}
+
+// renderCommitContextStrip renders a compact 1-row metadata summary strip below the Detail toolbar
+// for ConfigView and BlameView (showing snapshot metadata, plus BASE badge if pinned).
 func renderCommitContextStrip(commit, baseCommit *models.TimelineCommit, vsLive bool, diffRes *models.SemanticDiffResult, width int) string {
 	if width < 1 {
 		return ""

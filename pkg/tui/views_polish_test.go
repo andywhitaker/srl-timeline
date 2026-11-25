@@ -261,22 +261,47 @@ func TestToolbarCompactTierAndHitRangesAcrossWidths(t *testing.T) {
 					"unified": "[1] Unified",
 					"path":    "[2] Path",
 					"cli":     "[3] CLI",
-					"live":    "[4] Live",
+					"live":    "[4] " + GlyphPaused + " vs Running",
 				}
 				if w.compact {
 					expected = map[string]string{
 						"unified": "1:Uni",
 						"path":    "2:Path",
 						"cli":     "3:CLI",
-						"live":    "4:Live",
+						"live":    "4:" + GlyphPaused + "Run",
 					}
-				}
-				if vsLive {
-					expected["live"] = GlyphLive + " Live"
+					if vsLive {
+						expected["live"] = "4:" + GlyphLive + "Run"
+					}
+				} else if w.innerW < wideToolbarThreshold {
+					expected["live"] = "[4] " + GlyphPaused + " Running"
+					if vsLive {
+						expected["live"] = "[4] " + GlyphLive + " Running"
+					}
+				} else if vsLive {
+					expected["live"] = "[4] " + GlyphLive + " vs Running"
 				}
 				verifyToolbarHitAlignment(t, fmt.Sprintf("DiffView(vsLive=%v)", vsLive), toolbar, hitRanges, expected, w.innerW)
 
-				// Specifically at 80x24 (innerW=43): ALL 4 pills + scroll indicator must fit completely unclipped!
+				// Visual vertical divider │ must separate formats (1-3) from compare target toggle (4)
+				// whenever all 4 controls fit (innerW >= 40)
+				if w.innerW >= tightToolbarPadThreshold {
+					plain := stripPolishANSI(toolbar)
+					if !strings.Contains(plain, " "+GlyphPipe+" ") {
+						t.Fatalf("DiffView(innerW=%d, vsLive=%v) missing vertical divider %q between formats and toggle: %q",
+							w.innerW, vsLive, " "+GlyphPipe+" ", plain)
+					}
+					// Key hint 4 must ALWAYS remain visible in BOTH off and on states!
+					wantKeyHint := "[4]"
+					if w.compact {
+						wantKeyHint = "4:"
+					}
+					if !strings.Contains(plain, wantKeyHint) {
+						t.Fatalf("DiffView(innerW=%d, vsLive=%v) dropped key hint %q: %q", w.innerW, vsLive, wantKeyHint, plain)
+					}
+				}
+
+				// Specifically at 80x24 (innerW=43): ALL 4 pills + │ divider + scroll indicator must fit completely unclipped!
 				if w.termW == 80 {
 					plain := stripPolishANSI(toolbar)
 					if len(hitRanges) != 4 {
@@ -287,7 +312,7 @@ func TestToolbarCompactTierAndHitRangesAcrossWidths(t *testing.T) {
 							t.Fatalf("80x24 DiffView toolbar clipped %q: %q", expected[label], plain)
 						}
 					}
-					// Scroll progress indicator (e.g. "18/27" or "%") must be present
+					// Scroll progress indicator (e.g. "17/25" or "%") must be present
 					if !strings.Contains(plain, "/") && !strings.Contains(plain, "%") {
 						t.Fatalf("80x24 DiffView toolbar dropped scroll indicator: %q", plain)
 					}
@@ -332,6 +357,30 @@ func TestToolbarCompactTierAndHitRangesAcrossWidths(t *testing.T) {
 				}
 			}
 		})
+	}
+
+	// Verify medium tier (54 <= innerW < 62): "[4] ○ Running" / "[4] ● Running" + │ divider + exact hit alignment
+	for _, vsLive := range []bool{false, true} {
+		dvMed := NewDiffViewModel(58, 24)
+		dvMed.DiffMode = "cli"
+		dvMed.VsLive = vsLive
+		dvMed.IsFocused = true
+		dvMed.SetDiff(models.SemanticDiffResult{HasChanges: true, AddedCount: 25, CLIDiffLines: cliLines})
+		medToolbar, _ := dvMed.buildToolbar(58)
+		medExpected := map[string]string{
+			"unified": "[1] Unified",
+			"path":    "[2] Path",
+			"cli":     "[3] CLI",
+			"live":    "[4] " + GlyphPaused + " Running",
+		}
+		if vsLive {
+			medExpected["live"] = "[4] " + GlyphLive + " Running"
+		}
+		verifyToolbarHitAlignment(t, fmt.Sprintf("DiffView-medium(vsLive=%v)", vsLive), medToolbar, dvMed.ControlHitRanges(), medExpected, 58)
+		medPlain := stripPolishANSI(medToolbar)
+		if !strings.Contains(medPlain, " "+GlyphPipe+" ") {
+			t.Fatalf("medium DiffView toolbar missing divider: %q", medPlain)
+		}
 	}
 
 	// Verify 4-digit line count at 80x24 falls back cleanly to percentage ("0%") instead of dropping scroll status
@@ -414,7 +463,7 @@ func TestContextStripCompareAndVsLiveStats(t *testing.T) {
 		t.Fatalf("A↔B deduplicated leaf totals expected +2 ~1 (not +3): %q", dedupCtx)
 	}
 
-	// 3. VsLive compare displays actual DiffResult totals (+2 -3) next to ● LIVE
+	// 3. VsLive compare displays actual DiffResult totals (+2 -3) next to ● RUNNING CONFIG
 	dvLive := NewDiffViewModel(77, 30)
 	dvLive.Commit = targetCommit
 	dvLive.VsLive = true
@@ -425,7 +474,7 @@ func TestContextStripCompareAndVsLiveStats(t *testing.T) {
 		CLIDiffLines: []string{"+ set / system banner login-banner hi"},
 	})
 	liveCtx := strings.Split(stripPolishANSI(dvLive.View()), "\n")[2]
-	for _, want := range []string{"97fa5693", GlyphLive + " LIVE", "+2", "-3", "root"} {
+	for _, want := range []string{"97fa5693 →", GlyphLive + " RUNNING CONFIG", "+2", "-3", "root"} {
 		if !strings.Contains(liveCtx, want) {
 			t.Fatalf("VsLive context strip missing %q: %q", want, liveCtx)
 		}
@@ -434,14 +483,61 @@ func TestContextStripCompareAndVsLiveStats(t *testing.T) {
 		t.Fatalf("VsLive context strip leaked single-commit stat +9: %q", liveCtx)
 	}
 
-	// 4. VsLive with identical config shows ✓ Identical
+	// 4. VsLive with identical config shows ✓ Matches Running in context strip AND context-aware empty diff message
 	dvIdentical := NewDiffViewModel(77, 30)
 	dvIdentical.Commit = targetCommit
 	dvIdentical.VsLive = true
 	dvIdentical.SetDiff(models.SemanticDiffResult{HasChanges: false})
 	identCtx := strings.Split(stripPolishANSI(dvIdentical.View()), "\n")[2]
-	if !strings.Contains(identCtx, GlyphCheck+" Identical") {
-		t.Fatalf("VsLive identical context strip expected '%s Identical', got: %q", GlyphCheck, identCtx)
+	if !strings.Contains(identCtx, GlyphCheck+" Matches Running") {
+		t.Fatalf("VsLive identical context strip expected '%s Matches Running', got: %q", GlyphCheck, identCtx)
+	}
+	identBody := stripPolishANSI(dvIdentical.Viewport.View())
+	if !strings.Contains(identBody, GlyphCheck+" Revision 97fa5693 matches the live running configuration") {
+		t.Fatalf("VsLive empty diff body missing context-aware message, got:\n%s", identBody)
+	}
+
+	// 5. Default vs previous commit shows "Prev <parentSHA> → <commitID>"
+	dvPrev := NewDiffViewModel(77, 30)
+	dvPrev.Commit = targetCommit
+	dvPrev.ParentSHA = baseCommit.CommitID
+	dvPrev.SetDiff(models.SemanticDiffResult{HasChanges: false})
+	prevCtx := strings.Split(stripPolishANSI(dvPrev.View()), "\n")[2]
+	for _, want := range []string{"Prev df3b5eca → 97fa5693", "root", "2026-11-24 16:30", "+9"} {
+		if !strings.Contains(prevCtx, want) {
+			t.Fatalf("Default Prev context strip missing %q: %q", want, prevCtx)
+		}
+	}
+	prevBody := stripPolishANSI(dvPrev.Viewport.View())
+	if !strings.Contains(prevBody, GlyphCheck+" No configuration changes vs previous commit") {
+		t.Fatalf("Default empty diff body missing previous-commit message, got:\n%s", prevBody)
+	}
+
+	// 6. Initial/root commit (ParentSHA == "") shows "Initial → <commitID>"
+	dvInit := NewDiffViewModel(77, 30)
+	dvInit.Commit = baseCommit
+	dvInit.ParentSHA = ""
+	dvInit.SetDiff(models.SemanticDiffResult{HasChanges: true, AddedCount: 3, CLIDiffLines: []string{"+ set / system"}})
+	initCtx := strings.Split(stripPolishANSI(dvInit.View()), "\n")[2]
+	for _, want := range []string{"Initial → df3b5eca", "root", "+3", "~3", "-4"} {
+		if !strings.Contains(initCtx, want) {
+			t.Fatalf("Initial commit context strip missing %q: %q", want, initCtx)
+		}
+	}
+
+	// 7. Base compare identical shows ✓ Identical in strip and context-aware empty diff message (with filter note)
+	dvBaseSame := NewDiffViewModel(77, 30)
+	dvBaseSame.BaseCommit = baseCommit
+	dvBaseSame.Commit = targetCommit
+	dvBaseSame.FilterQuery = "bgp"
+	dvBaseSame.SetDiff(models.SemanticDiffResult{HasChanges: false})
+	baseSameCtx := strings.Split(stripPolishANSI(dvBaseSame.View()), "\n")[2]
+	if !strings.Contains(baseSameCtx, GlyphCheck+" Identical") {
+		t.Fatalf("BASE identical context strip expected '%s Identical', got: %q", GlyphCheck, baseSameCtx)
+	}
+	baseSameBody := stripPolishANSI(dvBaseSame.Viewport.View())
+	if !strings.Contains(baseSameBody, "No differences between BASE df3b5eca and 97fa5693 (filter: 'bgp')") {
+		t.Fatalf("BASE empty diff body missing filter-aware message, got:\n%s", baseSameBody)
 	}
 }
 
@@ -638,22 +734,28 @@ func TestPolishedViewsFullBleedAcrossAll11Themes(t *testing.T) {
 			t.Fatalf("failed to set theme %q", th.Name)
 		}
 
-		// DiffView Path mode A↔B compare at 80x24 (compact toolbar, unfocused) and 120x35 (full toolbar, focused)
+		// DiffView across all compare modes & sizes (40x12, 80x24, 120x35, 220x50)
 		for _, sz := range []struct {
-			label   string
-			w, h    int
-			focused bool
-			vsLive  bool
+			label     string
+			w, h      int
+			focused   bool
+			vsLive    bool
+			useBase   bool
+			parentSHA string
 		}{
-			{"80x24-path-ab-unfocused", 43, 19, false, false},
-			{"120x35-path-live-focused", 77, 30, true, true},
+			{"40x12-prev-focused", 18, 7, true, false, false, baseCommit.CommitID},
+			{"80x24-path-ab-unfocused", 43, 19, false, false, true, ""},
+			{"80x24-prev-focused", 43, 19, true, false, false, baseCommit.CommitID},
+			{"120x35-path-live-focused", 77, 30, true, true, false, ""},
+			{"220x50-initial-focused", 167, 45, true, false, false, ""},
 		} {
 			dv := NewDiffViewModel(sz.w, sz.h)
 			dv.DiffMode = "path"
 			dv.IsFocused = sz.focused
 			dv.VsLive = sz.vsLive
 			dv.Commit = targetCommit
-			if !sz.vsLive {
+			dv.ParentSHA = sz.parentSHA
+			if sz.useBase {
 				dv.BaseCommit = baseCommit
 			}
 			dv.SetDiff(pathDiff)

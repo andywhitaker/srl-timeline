@@ -2180,3 +2180,143 @@ func TestResizeDoesNotRequeryGitAndPreservesScrollOffset(t *testing.T) {
 		}
 	}
 }
+
+func TestDiffTargetUXParentLookupToggleAndFooter(t *testing.T) {
+	backend := gitbackend.NewGitBackend(filepath.Join(t.TempDir(), "repo"))
+	t0 := time.Now().UTC().Add(-5 * time.Minute)
+	cfg1 := map[string]interface{}{
+		"system": map[string]interface{}{"name": map[string]interface{}{"host-name": "srl-1"}},
+	}
+	cfg2 := map[string]interface{}{
+		"system": map[string]interface{}{"name": map[string]interface{}{"host-name": "srl-2"}},
+		"interface": []interface{}{
+			map[string]interface{}{"name": "ethernet-1/1", "description": "Uplink"},
+		},
+	}
+	cfg3 := map[string]interface{}{
+		"system": map[string]interface{}{"name": map[string]interface{}{"host-name": "srl-3"}},
+		"interface": []interface{}{
+			map[string]interface{}{"name": "ethernet-1/1", "description": "Uplink"},
+			map[string]interface{}{"name": "ethernet-1/2", "description": "Edge-Special"},
+		},
+	}
+	_, sha1, err := backend.RecordConfigChange(cfg1, "alice", "1", "", t0, "Initial", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, sha2, err := backend.RecordConfigChange(cfg2, "bob", "2", "", t0.Add(time.Minute), "Add eth1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, sha3, err := backend.RecordConfigChange(cfg3, "admin", "3", "", t0.Add(2*time.Minute), "Add eth2", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	model := NewAppModel(backend, nil, "")
+	resModel, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 35})
+	app := resModel.(AppModel)
+
+	// 1. Default selection (HEAD = sha3) displays Prev <sha2> → <sha3> and OFF toggle "[4] ○ vs Running"
+	if app.DiffView.ParentSHA != sha2[:8] {
+		t.Fatalf("expected ParentSHA=%s for HEAD commit, got %q", sha2[:8], app.DiffView.ParentSHA)
+	}
+	viewOff := stripANSI(app.View())
+	if !strings.Contains(viewOff, "Prev "+sha2[:8]+" → "+sha3[:8]) {
+		t.Fatalf("expected Prev %s → %s in DiffView context strip, got:\n%s", sha2[:8], sha3[:8], viewOff)
+	}
+	if !strings.Contains(viewOff, GlyphPipe+" [4] "+GlyphPaused+" vs Running") && !strings.Contains(viewOff, GlyphPipe+"  [4] "+GlyphPaused+" vs Running") {
+		t.Fatalf("expected separated OFF toggle '[4] %s vs Running' in toolbar, got:\n%s", GlyphPaused, viewOff)
+	}
+
+	// 2. Filtering to "ethernet-1/2" leaves only sha3 in filtered timeline, yet ParentSHA MUST still be sha2!
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	app = resModel.(AppModel)
+	for _, r := range "ethernet-1/2" {
+		resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		app = resModel.(AppModel)
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = resModel.(AppModel)
+	if len(app.TimelineView.Commits) != 1 || app.DiffView.ParentSHA != sha2[:8] {
+		t.Fatalf("filtered commit lost true parent SHA: len=%d parent=%q want=%q", len(app.TimelineView.Commits), app.DiffView.ParentSHA, sha2[:8])
+	}
+	// Clear filter
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	app = resModel.(AppModel)
+
+	// 3. Initial/root commit (sha1, index 2) has ParentSHA == "" and renders "Initial → <sha1>"
+	app.TimelineView.SelectIndex(2)
+	app.updateActiveTabContent()
+	if app.DiffView.ParentSHA != "" {
+		t.Fatalf("expected empty ParentSHA for initial commit, got %q", app.DiffView.ParentSHA)
+	}
+	viewInit := stripANSI(app.View())
+	if !strings.Contains(viewInit, "Initial → "+sha1[:8]) {
+		t.Fatalf("expected 'Initial → %s' in DiffView context strip, got:\n%s", sha1[:8], viewInit)
+	}
+
+	// 4. Select HEAD (sha3), focus Detail, verify footer shows "4/v vs Running"
+	app.TimelineView.SelectIndex(0)
+	app.updateActiveTabContent()
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyTab})
+	app = resModel.(AppModel)
+	app.Notification = ""
+	footerOff := stripANSI(strings.Split(app.View(), "\n")[34])
+	if !strings.Contains(footerOff, "4/v vs Running") {
+		t.Fatalf("expected Detail/Diff footer to show '4/v vs Running', got: %q", footerOff)
+	}
+
+	// 5. Press '4' -> VsLive ON: warning toast, "[4] ● vs Running" visible, "● RUNNING CONFIG" + "✓ Matches Running",
+	//    context-aware empty message, and footer (once toast clears) shows "4/v vs Prev"
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'4'}})
+	app = resModel.(AppModel)
+	if !app.VsLive {
+		t.Fatalf("expected VsLive=true after pressing '4'")
+	}
+	wantOnToast := fmt.Sprintf("Comparing %s → Live Running Config (press 4 to return to vs Prev)", sha3[:8])
+	if app.Notification != wantOnToast {
+		t.Fatalf("unexpected VsLive ON toast: got %q, want %q", app.Notification, wantOnToast)
+	}
+	if app.NotifyStyle.GetBackground() != ColorWarningBg {
+		t.Fatalf("expected VsLive ON toast background ColorWarningBg, got %v", app.NotifyStyle.GetBackground())
+	}
+	viewOn := stripANSI(app.View())
+	if !strings.Contains(viewOn, "[4] "+GlyphLive+" vs Running") {
+		t.Fatalf("expected '[4] %s vs Running' visible when VsLive=true, got:\n%s", GlyphLive, viewOn)
+	}
+	if !strings.Contains(viewOn, sha3[:8]+" →  "+GlyphLive+" RUNNING CONFIG ") {
+		t.Fatalf("expected '%s →  %s RUNNING CONFIG ' in context strip, got:\n%s", sha3[:8], GlyphLive, viewOn)
+	}
+	if !strings.Contains(viewOn, "Revision "+sha3[:8]+" matches the live running configuration") {
+		t.Fatalf("expected context-aware empty diff message for HEAD vs Running, got:\n%s", viewOn)
+	}
+	app.Notification = ""
+	footerOn := stripANSI(strings.Split(app.View(), "\n")[34])
+	if !strings.Contains(footerOn, "4/v vs Prev") {
+		t.Fatalf("expected Detail/Diff footer with VsLive=true to show '4/v vs Prev', got: %q", footerOn)
+	}
+
+	// 6. Mouse click on [4] chip toggles VsLive back OFF with primary toast!
+	timelineW, _ := computeSplitOuterWidths(120)
+	detailStartX := timelineW + 1
+	var liveChip HitChip
+	for _, c := range app.DiffView.ControlHitRanges() {
+		if c.Label == "live" {
+			liveChip = c
+			break
+		}
+	}
+	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + 1 + liveChip.StartX + 2, Y: 3, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.VsLive {
+		t.Fatalf("expected mouse click on [4] toggle chip to disable VsLive")
+	}
+	wantOffToast := "Comparing vs Previous Commit (press 4 to compare vs Running Config)"
+	if app.Notification != wantOffToast {
+		t.Fatalf("unexpected VsLive OFF toast: got %q, want %q", app.Notification, wantOffToast)
+	}
+	if app.NotifyStyle.GetBackground() != ColorPrimary {
+		t.Fatalf("expected VsLive OFF toast background ColorPrimary, got %v", app.NotifyStyle.GetBackground())
+	}
+}

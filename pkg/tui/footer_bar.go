@@ -14,6 +14,7 @@ type FooterContext struct {
 	ActiveTab    int    // 0=diff, 1=config, 2=blame
 	Zoomed       bool
 	HasBase      bool
+	VsLive       bool
 	ToastText    string
 	ToastKind    string // "primary", "info", "success", "warning", "error"
 }
@@ -202,9 +203,13 @@ func buildFooterShortcuts(ctx FooterContext) (primary []footerShortcut, trailing
 		primary = append(primary, footerShortcut{"z", zoomDesc})
 		switch ctx.ActiveTab {
 		case 0: // TabDiff
+			liveDesc := "vs Running"
+			if ctx.VsLive {
+				liveDesc = "vs Prev"
+			}
 			primary = append(primary,
-				footerShortcut{"1-3", "Mode"},
-				footerShortcut{"4/v", "Live"},
+				footerShortcut{"1-3", "Format"},
+				footerShortcut{"4/v", liveDesc},
 			)
 		case 1: // TabConfig
 			primary = append(primary, footerShortcut{"1-2", "Format"})

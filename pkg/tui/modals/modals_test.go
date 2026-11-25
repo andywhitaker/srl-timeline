@@ -536,6 +536,8 @@ func TestHelpModalCategoriesScrollAndKeybindings(t *testing.T) {
 		"Ctrl+t",
 		"Zoom",
 		"Base Commit",
+		"4 / v",
+		"Toggle vs Running Config",
 		"Shift+Tab",
 		"Cherry-Pick",
 		"Press [Esc], [Enter], or [?] to close",

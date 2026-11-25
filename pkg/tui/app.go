@@ -128,6 +128,7 @@ type AppModel struct {
 	Zoomed              bool
 	BaseCommitSHA       string
 	baseCommit          *models.TimelineCommit
+	parentSHAByFullSHA  map[string]string
 	lastHeadSHA         string
 	lastDetailCommitSHA string
 	lastDetailTab       ActiveTab
@@ -195,12 +196,13 @@ func NewAppModel(backend *gitbackend.GitBackend, client *srlclient.SRLClient, in
 		Exporter:    e,
 		BlameEngine: b,
 
-		FocusedPane:     PaneTimeline,
-		ActiveTab:       TabDiff,
-		ActiveModal:     ModalNone,
-		lastHeadSHA:     backend.GetHeadSHA(),
-		scopeBackfilled: make(map[string]bool),
-		commitChan:      commitChan,
+		FocusedPane:        PaneTimeline,
+		ActiveTab:          TabDiff,
+		ActiveModal:        ModalNone,
+		parentSHAByFullSHA: make(map[string]string),
+		lastHeadSHA:        backend.GetHeadSHA(),
+		scopeBackfilled:    make(map[string]bool),
+		commitChan:         commitChan,
 	}
 
 	// Register daemon listener
@@ -514,20 +516,24 @@ func (m *AppModel) toggleVsLive() tea.Cmd {
 	m.DiffView.ResetScroll()
 
 	var notif string
+	var toastStyle lipgloss.Style
 	if m.VsLive {
-		notif = "Comparing revision vs LIVE running config [4/v]"
+		id := "revision"
+		if sel := m.TimelineView.SelectedCommit(); sel != nil && strings.TrimSpace(sel.CommitID) != "" {
+			id = sel.CommitID
+		}
+		notif = fmt.Sprintf("Comparing %s → Live Running Config (press 4 to return to vs Prev)", id)
+		toastStyle = lipgloss.NewStyle().Background(ColorWarningBg).Foreground(ColorOnWarning).Bold(true).Padding(0, 1)
 		if !m.isFetchingLiveCfg {
 			m.isFetchingLiveCfg = true
 			cmds = append(cmds, fetchLiveConfigCmd(m.SRLClient))
 		}
 	} else {
-		notif = "Comparing revision vs previous commit"
+		notif = "Comparing vs Previous Commit (press 4 to compare vs Running Config)"
+		toastStyle = lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent).Bold(true).Padding(0, 1)
 	}
 
-	seq := m.setNotification(
-		notif,
-		lipgloss.NewStyle().Background(ColorWarningBg).Foreground(ColorOnWarning).Bold(true).Padding(0, 1),
-	)
+	seq := m.setNotification(notif, toastStyle)
 	cmds = append(cmds, clearNotificationCmd(seq))
 	m.updateActiveTabContent()
 	return tea.Batch(cmds...)
@@ -1702,6 +1708,14 @@ func (m *AppModel) resizeLayout(width, height int) {
 func (m *AppModel) refreshTimeline() {
 	filterQuery := m.FilterBar.Value()
 	allCommits := m.GitBackend.GetTimeline(200, "")
+	parentMap := make(map[string]string, len(allCommits))
+	for i := 0; i+1 < len(allCommits); i++ {
+		if allCommits[i].FullSHA != "" {
+			parentMap[allCommits[i].FullSHA] = allCommits[i+1].CommitID
+		}
+	}
+	m.parentSHAByFullSHA = parentMap
+
 	var filteredCommits []models.TimelineCommit
 	if filterQuery != "" {
 		filteredCommits = m.GitBackend.GetTimeline(200, filterQuery)
@@ -1767,6 +1781,8 @@ func (m *AppModel) updateActiveTabContent() {
 
 	selCopy := *selected
 	m.DiffView.Commit = &selCopy
+	m.DiffView.ParentSHA = m.parentSHAByFullSHA[selected.FullSHA]
+	m.DiffView.FilterQuery = filterQuery
 	m.DiffView.BaseCommit = m.baseCommit
 	m.ConfigView.Commit = &selCopy
 	m.ConfigView.BaseCommit = m.baseCommit
@@ -1863,6 +1879,7 @@ func (m AppModel) View() string {
 		ActiveTab:    int(m.ActiveTab),
 		Zoomed:       m.Zoomed,
 		HasBase:      m.BaseCommitSHA != "",
+		VsLive:       m.VsLive,
 		ToastText:    m.Notification,
 		ToastKind:    m.notifyKind,
 	})

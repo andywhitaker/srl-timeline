@@ -39,8 +39,8 @@ var helpCategories = []helpCategory{
 		items: []helpItem{
 			{"d / c / b", "Diff / Config / Blame tab"},
 			{"[ / ]", "Cycle detail tabs"},
-			{"1 – 4", "Diff modes / Config / Blame sub-views"},
-			{"v", "Toggle Diff vs Live Running"},
+			{"1 – 3", "Diff format / Config / Blame"},
+			{"4 / v", "Toggle vs Running Config"},
 			{"m", "Pin/unpin Base Commit (A↔B Compare)"},
 			{"w", "Toggle line wrap (Config / Blame)"},
 		},
