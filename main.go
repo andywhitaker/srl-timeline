@@ -22,7 +22,7 @@ import (
 )
 
 // Version is the current release version of srl-timeline.
-const Version = "0.0.4"
+const Version = "0.0.5"
 
 func init() {
 	configureEnvironmentAppearance()

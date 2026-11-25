@@ -1,5 +1,5 @@
 PACKAGE := srl-timeline
-VERSION := 0.0.4
+VERSION := 0.0.5
 ARCH := amd64
 DEB_FILE := dist/$(PACKAGE)_$(VERSION)_$(ARCH).deb
 

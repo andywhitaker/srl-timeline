@@ -26,7 +26,7 @@ A configuration timeline and version history tool for Nokia SR Linux using Git.
 You can either download a pre-built Debian package / binary or build from source:
 
 ### Option A: Download Pre-built Package or Binary (Recommended)
-Download the latest Debian package (`srl-timeline_0.0.4_amd64.deb`) or static Linux binary (`timeline`) from the [GitHub Releases](https://github.com/andywhitaker/srl-timeline/releases/latest) page on your local workstation.
+Download the latest Debian package (`srl-timeline_0.0.5_amd64.deb`) or static Linux binary (`timeline`) from the [GitHub Releases](https://github.com/andywhitaker/srl-timeline/releases/latest) page on your local workstation.
 
 ### Option B: Build from Source with Go
 `timeline` is written in pure Go and compiles to a single static binary with no external runtime dependencies:
@@ -36,7 +36,7 @@ Download the latest Debian package (`srl-timeline_0.0.4_amd64.deb`) or static Li
 git clone https://github.com/andywhitaker/srl-timeline.git
 cd srl-timeline
 
-# Build the Debian package (dist/srl-timeline_0.0.4_amd64.deb) and static binary (bin/timeline)
+# Build the Debian package (dist/srl-timeline_0.0.5_amd64.deb) and static binary (bin/timeline)
 make deb
 
 # Or compile only the static binary
@@ -57,10 +57,10 @@ It also configures multi-user repository permissions under `/etc/opt/srlinux/tim
 
 ```bash
 # 1. Copy the package from your workstation to the switch
-scp dist/srl-timeline_0.0.4_amd64.deb admin@<switch-ip>:/tmp/
+scp dist/srl-timeline_0.0.5_amd64.deb admin@<switch-ip>:/tmp/
 
 # 2. Install on the switch (from Linux bash or via 'bash' in sr_cli)
-sudo dpkg -i /tmp/srl-timeline_0.0.4_amd64.deb
+sudo dpkg -i /tmp/srl-timeline_0.0.5_amd64.deb
 ```
 
 > **Tip**: After the first install, start a new `sr_cli` session so SR Linux loads the `tools timeline` CLI plugin.
