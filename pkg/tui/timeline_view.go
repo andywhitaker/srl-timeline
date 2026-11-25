@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/ansi"
 	"github.com/muesli/reflow/truncate"
 
 	"timeline/pkg/models"
@@ -15,20 +16,29 @@ const timelineLinesPerCommit = 2
 
 // TimelineViewModel handles the interactive visual timeline tree graph.
 type TimelineViewModel struct {
-	Commits       []models.TimelineCommit
-	SelectedIndex int
-	BaseCommitSHA string
-	HeadSHA       string
-	FilterQuery   string
-	Viewport      viewport.Model
-	Width         int
-	Height        int
-	IsFocused     bool
+	Commits        []models.TimelineCommit
+	SelectedIndex  int
+	BaseCommitSHA  string
+	HeadSHA        string
+	FilterQuery    string
+	WindowNarrowed bool // true when time window < All history
+	TotalMatching  int  // total path-filtered commits across All history, before window slicing
+	LeftSHA        string
+	RightSHA       string
+	Viewport       viewport.Model
+	Width          int
+	Height         int
+	IsFocused      bool
 
-	selectedSHA         string
-	lastRenderedFocused bool
-	lastRenderedBaseSHA string
-	lastRenderedFilter  string
+	selectedSHA                string
+	lastRenderedFocused        bool
+	lastRenderedBaseSHA        string
+	lastRenderedFilter         string
+	lastRenderedLeftSHA        string
+	lastRenderedRightSHA       string
+	lastRenderedWindowNarrowed bool
+	lastRenderedTotalMatching  int
+	renderedLines              []string
 }
 
 // NewTimelineViewModel creates a new visual timeline component.
@@ -212,13 +222,19 @@ func (m *TimelineViewModel) ensureVisible() {
 	}
 }
 
-// SetSize handles terminal resizing.
+// SetSize handles terminal resizing without needlessly re-rendering commit cards when width is unchanged.
 func (m *TimelineViewModel) SetSize(width, height int) {
+	if m.Width == width && m.Height == height {
+		return
+	}
+	prevW := m.Width
 	m.Width = width
 	m.Height = height
 	m.Viewport.Width = timelineViewportWidth(width)
 	m.Viewport.Height = timelineViewportHeight(height)
-	m.UpdateViewportContent()
+	if prevW != width || m.Viewport.TotalLineCount() == 0 {
+		m.UpdateViewportContent()
+	}
 	m.ensureVisible()
 }
 
@@ -232,10 +248,16 @@ func (m *TimelineViewModel) UpdateViewportContent() {
 	m.lastRenderedFocused = m.IsFocused
 	m.lastRenderedBaseSHA = m.BaseCommitSHA
 	m.lastRenderedFilter = m.FilterQuery
+	m.lastRenderedLeftSHA = m.LeftSHA
+	m.lastRenderedRightSHA = m.RightSHA
+	m.lastRenderedWindowNarrowed = m.WindowNarrowed
+	m.lastRenderedTotalMatching = m.TotalMatching
 
 	if len(m.Commits) == 0 {
 		var emptyMsg string
-		if q := strings.TrimSpace(m.FilterQuery); q != "" {
+		if m.WindowNarrowed && m.TotalMatching > 0 {
+			emptyMsg = "No commits in current time window.\nPress 0 (All) or f (Fit) to expand."
+		} else if q := strings.TrimSpace(m.FilterQuery); q != "" {
 			emptyMsg = fmt.Sprintf("No commits match filter '%s'\nPress Esc to clear filter.", q)
 		} else {
 			emptyMsg = "No commits recorded yet.\nConfiguration changes will appear here in realtime."
@@ -245,6 +267,7 @@ func (m *TimelineViewModel) UpdateViewportContent() {
 		for _, line := range strings.Split(emptyMsg, "\n") {
 			padded = append(padded, PaintLine(" "+line, vpW, ColorBackground, ColorMuted))
 		}
+		m.renderedLines = padded
 		m.Viewport.SetContent(strings.Join(padded, "\n"))
 		m.Viewport.SetYOffset(0)
 		return
@@ -264,6 +287,8 @@ func (m *TimelineViewModel) UpdateViewportContent() {
 		}
 		isRoot := c.IsStartup || (unfiltered && i == total-1)
 		isBase := m.BaseCommitSHA != "" && c.FullSHA == m.BaseCommitSHA
+		isLeft := m.LeftSHA != "" && c.FullSHA != "" && c.FullSHA == m.LeftSHA
+		isRight := m.RightSHA != "" && c.FullSHA != "" && c.FullSHA == m.RightSHA
 
 		rowBg := ColorBackground
 		rowFg := ColorText
@@ -325,6 +350,20 @@ func (m *TimelineViewModel) UpdateViewportContent() {
 				Foreground(ColorOnAccent).
 				Bold(true).
 				Render("BASE"))
+		}
+		if isLeft && !isBase {
+			badges = append(badges, lipgloss.NewStyle().
+				Background(ColorPrimary).
+				Foreground(ColorOnAccent).
+				Bold(true).
+				Render("A"))
+		}
+		if isRight {
+			badges = append(badges, lipgloss.NewStyle().
+				Background(ColorSuccessBg).
+				Foreground(ColorOnAccent).
+				Bold(true).
+				Render("B"))
 		}
 		if c.IsRestored {
 			badges = append(badges, lipgloss.NewStyle().
@@ -421,6 +460,7 @@ func (m *TimelineViewModel) UpdateViewportContent() {
 		)
 	}
 
+	m.renderedLines = rows
 	m.Viewport.SetContent(strings.Join(rows, "\n"))
 }
 
@@ -483,11 +523,147 @@ func isGenericCommitMessage(msg string) bool {
 	return false
 }
 
-// View renders the visual timeline component inside a border-titled box with a slim scrollbar.
+func (m TimelineViewModel) titleText() string {
+	titleText := "TIMELINE"
+	if m.WindowNarrowed {
+		if len(m.Commits) > 0 {
+			sel := m.SelectedIndex + 1
+			if sel < 1 {
+				sel = 1
+			}
+			if sel > len(m.Commits) {
+				sel = len(m.Commits)
+			}
+			titleText = fmt.Sprintf("IN WINDOW %d/%d", sel, len(m.Commits))
+		} else {
+			titleText = "IN WINDOW 0/0"
+		}
+	} else if len(m.Commits) > 0 {
+		sel := m.SelectedIndex + 1
+		if sel < 1 {
+			sel = 1
+		}
+		if sel > len(m.Commits) {
+			sel = len(m.Commits)
+		}
+		titleText = fmt.Sprintf("TIMELINE %d/%d", sel, len(m.Commits))
+	}
+	return titleText
+}
+
+func (m TimelineViewModel) buildTopBorder(outerW int, borderFg lipgloss.Color) (topRow string, collapseStartX, collapseEndX int) {
+	b := lipgloss.RoundedBorder()
+	borderStyle := lipgloss.NewStyle().Foreground(borderFg).Background(ColorBackground)
+	if outerW <= 1 {
+		return PaintBarLine(b.TopLeft, outerW, ColorBackground, borderFg), -1, -1
+	}
+
+	titleStyle := lipgloss.NewStyle().Foreground(ColorMuted).Background(ColorBackground)
+	if m.IsFocused {
+		titleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Background(ColorBackground)
+	}
+
+	titleText := m.titleText()
+	btnText := "[◀]"
+	if outerW < 20 {
+		btnText = "◀"
+	}
+	btnW := ansi.PrintableRuneWidth(btnText)
+	btnStyled := lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Background(ColorBadgeBg).Render(btnText)
+	sp := lipgloss.NewStyle().Background(ColorBackground).Render(" ")
+
+	// Layout: ╭─ (2) + " " (1) + title + " " (1) + fill (>=1) + " " (1) + btn (btnW) + " " (1) + ─╮ (2)
+	// Fixed overhead = 8 + btnW, plus at least 1 fill char => 9 + btnW.
+	if outerW >= 12+btnW {
+		maxTitleW := outerW - 9 - btnW
+		if maxTitleW < 2 {
+			maxTitleW = 2
+		}
+		displayTitle := titleText
+		if ansi.PrintableRuneWidth(displayTitle) > maxTitleW {
+			displayTitle = truncate.String(displayTitle, uint(maxTitleW))
+		}
+		tw := ansi.PrintableRuneWidth(displayTitle)
+		fillW := outerW - 8 - tw - btnW
+		if fillW < 1 {
+			fillW = 1
+		}
+		collapseStartX = 5 + tw + fillW
+		collapseEndX = collapseStartX + btnW
+		raw := borderStyle.Render(b.TopLeft+b.Top) +
+			sp + titleStyle.Render(displayTitle) + sp +
+			borderStyle.Render(strings.Repeat(b.Top, fillW)) +
+			sp + btnStyled + sp +
+			borderStyle.Render(b.Top+b.TopRight)
+		return PaintBarLine(raw, outerW, ColorBackground, borderFg), collapseStartX, collapseEndX
+	}
+
+	// Ultra-narrow fallback without button.
+	return PaintBarLine(b.TopLeft+strings.Repeat(b.Top, outerW-2)+b.TopRight, outerW, ColorBackground, borderFg), -1, -1
+}
+
+// CollapseHitRange returns the clickable [startX, endX) column range (in outer pane coordinates)
+// of the `[◀]` collapse button on the top border of the Left Panel, or (-1, -1) if hidden.
+func (m TimelineViewModel) CollapseHitRange() (startX, endX int) {
+	innerW := m.Width
+	if innerW < 1 {
+		innerW = 1
+	}
+	borderFg := ColorBorder
+	if m.IsFocused {
+		borderFg = ColorActive
+	}
+	_, startX, endX = m.buildTopBorder(innerW+2, borderFg)
+	return startX, endX
+}
+
+// RenderCollapsedTimelineRail renders the slim 3-column collapsed sidebar rail (`▶`) shown
+// on the far left of the workspace when the Left Commit List is minimized, giving a clear
+// visual indicator and clickable expand target.
+func RenderCollapsedTimelineRail(height int) string {
+	if height <= 0 {
+		return ""
+	}
+	b := lipgloss.RoundedBorder()
+	borderStyle := lipgloss.NewStyle().Foreground(ColorBorder).Background(ColorBackground)
+	arrowStyle := lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Background(ColorSurfaceFocus)
+	emptyCell := lipgloss.NewStyle().Background(ColorSurface).Render(" ")
+	leftBar := borderStyle.Render(b.Left)
+	rightBar := borderStyle.Render(b.Right)
+
+	topRow := PaintBarLine(b.TopLeft+b.Top+b.TopRight, 3, ColorBackground, ColorBorder)
+	if height == 1 {
+		return topRow
+	}
+
+	rows := make([]string, 0, height)
+	rows = append(rows, topRow)
+
+	innerH := height - 2
+	midRow := innerH / 2
+	for i := 0; i < innerH; i++ {
+		cell := emptyCell
+		if i == 0 || i == midRow {
+			cell = arrowStyle.Render("▶")
+		}
+		rows = append(rows, PaintBarLine(leftBar+cell+rightBar, 3, ColorBackground, ColorBorder))
+	}
+
+	bottomRow := PaintBarLine(b.BottomLeft+b.Bottom+b.BottomRight, 3, ColorBackground, ColorBorder)
+	rows = append(rows, bottomRow)
+	return strings.Join(rows, "\n")
+}
+
+// View renders the visual timeline component inside a border-titled box with a slim scrollbar
+// and a clickable `[◀]` collapse button on the top border.
 func (m TimelineViewModel) View() string {
 	if m.IsFocused != m.lastRenderedFocused ||
 		m.BaseCommitSHA != m.lastRenderedBaseSHA ||
-		m.FilterQuery != m.lastRenderedFilter {
+		m.FilterQuery != m.lastRenderedFilter ||
+		m.LeftSHA != m.lastRenderedLeftSHA ||
+		m.RightSHA != m.lastRenderedRightSHA ||
+		m.WindowNarrowed != m.lastRenderedWindowNarrowed ||
+		m.TotalMatching != m.lastRenderedTotalMatching {
 		prevY := m.Viewport.YOffset
 		m.UpdateViewportContent()
 		m.Viewport.SetYOffset(prevY)
@@ -501,27 +677,30 @@ func (m TimelineViewModel) View() string {
 	if innerH < 1 {
 		innerH = 1
 	}
-
-	titleText := "TIMELINE"
-	if len(m.Commits) > 0 {
-		sel := m.SelectedIndex + 1
-		if sel < 1 {
-			sel = 1
-		}
-		if sel > len(m.Commits) {
-			sel = len(m.Commits)
-		}
-		titleText = fmt.Sprintf("TIMELINE %d/%d", sel, len(m.Commits))
-	}
+	outerW := innerW + 2
+	outerH := innerH + 2
 
 	borderFg := ColorBorder
-	titleStyle := lipgloss.NewStyle().Foreground(ColorMuted).Background(ColorBackground)
 	if m.IsFocused {
 		borderFg = ColorActive
-		titleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorActive).Background(ColorBackground)
 	}
-	styledTitle := titleStyle.Render(titleText)
 
-	body := renderViewportWithScrollbar(m.Viewport, innerW, innerH, ColorBackground)
-	return RenderTitledBox(styledTitle, body, innerW+2, innerH+2, borderFg, ColorBackground, ColorBackground)
+	topRow, _, _ := m.buildTopBorder(outerW, borderFg)
+	b := lipgloss.RoundedBorder()
+	borderStyle := lipgloss.NewStyle().Foreground(borderFg).Background(ColorBackground)
+	leftBar := borderStyle.Render(b.Left)
+	rightBar := borderStyle.Render(b.Right)
+
+	body := renderLinesWithScrollbar(m.renderedLines, m.Viewport, innerW, innerH, ColorBackground)
+	paintedBody := PaintSurface(body, innerW, innerH, ColorBackground, ColorText)
+
+	rows := make([]string, 0, outerH)
+	rows = append(rows, topRow)
+	for _, line := range strings.Split(paintedBody, "\n") {
+		rows = append(rows, leftBar+line+rightBar)
+	}
+	bottomRow := PaintBarLine(b.BottomLeft+strings.Repeat(b.Bottom, innerW)+b.BottomRight, outerW, ColorBackground, borderFg)
+	rows = append(rows, bottomRow)
+
+	return strings.Join(rows, "\n")
 }

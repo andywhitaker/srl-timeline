@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"timeline/pkg/blame"
+	"timeline/pkg/filter"
 	"timeline/pkg/models"
 )
 
@@ -258,14 +259,15 @@ func TestToolbarCompactTierAndHitRangesAcrossWidths(t *testing.T) {
 				}
 
 				expected := map[string]string{
-					"unified": "[1] Unified",
+					"unified": "[1] JSON",
 					"path":    "[2] Path",
 					"cli":     "[3] CLI",
+					"split":   "[S] " + GlyphPaused + " Split",
 					"live":    "[4] " + GlyphPaused + " vs Running",
 				}
 				if w.compact {
 					expected = map[string]string{
-						"unified": "1:Uni",
+						"unified": "1:JSON",
 						"path":    "2:Path",
 						"cli":     "3:CLI",
 						"live":    "4:" + GlyphPaused + "Run",
@@ -273,18 +275,19 @@ func TestToolbarCompactTierAndHitRangesAcrossWidths(t *testing.T) {
 					if vsLive {
 						expected["live"] = "4:" + GlyphLive + "Run"
 					}
-				} else if w.innerW < wideToolbarThreshold {
-					expected["live"] = "[4] " + GlyphPaused + " Running"
+				} else if w.innerW < 72 {
+					expected["split"] = "S:Split"
+					expected["live"] = "[4] " + GlyphPaused + " Run"
 					if vsLive {
-						expected["live"] = "[4] " + GlyphLive + " Running"
+						expected["live"] = "[4] " + GlyphLive + " Run"
 					}
 				} else if vsLive {
 					expected["live"] = "[4] " + GlyphLive + " vs Running"
 				}
 				verifyToolbarHitAlignment(t, fmt.Sprintf("DiffView(vsLive=%v)", vsLive), toolbar, hitRanges, expected, w.innerW)
 
-				// Visual vertical divider │ must separate formats (1-3) from compare target toggle (4)
-				// whenever all 4 controls fit (innerW >= 40)
+				// Visual vertical divider │ must separate formats (1-3) from compare target toggles
+				// whenever all controls fit (innerW >= 40)
 				if w.innerW >= tightToolbarPadThreshold {
 					plain := stripPolishANSI(toolbar)
 					if !strings.Contains(plain, " "+GlyphPipe+" ") {
@@ -298,6 +301,10 @@ func TestToolbarCompactTierAndHitRangesAcrossWidths(t *testing.T) {
 					}
 					if !strings.Contains(plain, wantKeyHint) {
 						t.Fatalf("DiffView(innerW=%d, vsLive=%v) dropped key hint %q: %q", w.innerW, vsLive, wantKeyHint, plain)
+					}
+					// Scroll progress indicator must stay visible across wide tiers too (innerW >= 43)
+					if !strings.Contains(plain, "/") && !strings.Contains(plain, "%") {
+						t.Fatalf("DiffView(innerW=%d, vsLive=%v) dropped scroll indicator: %q", w.innerW, vsLive, plain)
 					}
 				}
 
@@ -359,7 +366,7 @@ func TestToolbarCompactTierAndHitRangesAcrossWidths(t *testing.T) {
 		})
 	}
 
-	// Verify medium tier (54 <= innerW < 62): "[4] ○ Running" / "[4] ● Running" + │ divider + exact hit alignment
+	// Verify medium tier (54 <= innerW < 72): compact S:Split + "[4] ○ Run" / "[4] ● Run" + │ divider + scroll status + exact hit alignment
 	for _, vsLive := range []bool{false, true} {
 		dvMed := NewDiffViewModel(58, 24)
 		dvMed.DiffMode = "cli"
@@ -368,18 +375,22 @@ func TestToolbarCompactTierAndHitRangesAcrossWidths(t *testing.T) {
 		dvMed.SetDiff(models.SemanticDiffResult{HasChanges: true, AddedCount: 25, CLIDiffLines: cliLines})
 		medToolbar, _ := dvMed.buildToolbar(58)
 		medExpected := map[string]string{
-			"unified": "[1] Unified",
+			"unified": "[1] JSON",
 			"path":    "[2] Path",
 			"cli":     "[3] CLI",
-			"live":    "[4] " + GlyphPaused + " Running",
+			"split":   "S:Split",
+			"live":    "[4] " + GlyphPaused + " Run",
 		}
 		if vsLive {
-			medExpected["live"] = "[4] " + GlyphLive + " Running"
+			medExpected["live"] = "[4] " + GlyphLive + " Run"
 		}
 		verifyToolbarHitAlignment(t, fmt.Sprintf("DiffView-medium(vsLive=%v)", vsLive), medToolbar, dvMed.ControlHitRanges(), medExpected, 58)
 		medPlain := stripPolishANSI(medToolbar)
 		if !strings.Contains(medPlain, " "+GlyphPipe+" ") {
 			t.Fatalf("medium DiffView toolbar missing divider: %q", medPlain)
+		}
+		if !strings.Contains(medPlain, "/") && !strings.Contains(medPlain, "%") {
+			t.Fatalf("medium DiffView toolbar dropped scroll indicator: %q", medPlain)
 		}
 	}
 
@@ -654,13 +665,13 @@ func TestUnfocusedDetailActiveTabAndPillDistinguishable(t *testing.T) {
 	diffBarUnfocused, _ := dv.buildToolbar(77)
 
 	wantActivePill := normPill(lipgloss.NewStyle().Padding(0, 1).Background(ColorBadgeBg).Foreground(ColorText).Bold(true).Underline(true).Render("[3] CLI"))
-	wantInactivePill := normPill(lipgloss.NewStyle().Padding(0, 1).Background(ColorSurface).Foreground(ColorTextDim).Render("[1] Unified"))
+	wantInactivePill := normPill(lipgloss.NewStyle().Padding(0, 1).Background(ColorSurface).Foreground(ColorTextDim).Render("[1] JSON"))
 	if !strings.Contains(diffBarUnfocused, wantActivePill) {
 		t.Fatalf("unfocused DiffView active pill [3] CLI missing high-contrast active style;\nwant: %q\ngot:  %q",
 			wantActivePill, diffBarUnfocused)
 	}
 	if !strings.Contains(diffBarUnfocused, wantInactivePill) {
-		t.Fatalf("unfocused DiffView inactive pill [1] Unified missing dim style;\nwant: %q\ngot:  %q",
+		t.Fatalf("unfocused DiffView inactive pill [1] JSON missing dim style;\nwant: %q\ngot:  %q",
 			wantInactivePill, diffBarUnfocused)
 	}
 
@@ -783,5 +794,413 @@ func TestPolishedViewsFullBleedAcrossAll11Themes(t *testing.T) {
 		tl.IsFocused = true
 		tl.SetCommits([]models.TimelineCommit{*baseCommit, *targetCommit})
 		assertNoUnrecoveredReset(t, th.Name+"-timeline-120x35", tl.View(), 40, 32)
+	}
+}
+
+// ============================================================================
+// Decoupled Detail Filter Scope Banner & Matching-Line Cyan Gutter Markers
+// ============================================================================
+
+func TestFilterLineMatchesQuerySemantics(t *testing.T) {
+	cases := []struct {
+		line  string
+		query string
+		want  bool
+	}{
+		// Empty / header / pure punctuation never match
+		{"", "bgp", false},
+		{"set / interface ethernet-1/1 admin-state enable", "", false},
+		{"--- a/config.json", "config", false},
+		{"+++ b/config.json", "config", false},
+		{"@@ -1,4 +1,5 @@", "1", false},
+		{"  },", "bgp", false},
+		{"  {", "bgp", false},
+		// CLI & XPath matching with numeric-suffix safety
+		{"+ set / interface ethernet-1/1 description uplink", "ethernet-1/1", true},
+		{"+ set / interface ethernet-1/10 description downlink", "ethernet-1/1", false},
+		{"+ set / interface ethernet-1/1 admin-state enable", "/interface[name=ethernet-1/1]", true},
+		{"+ set / interface ethernet-1/10 admin-state enable", "/interface[name=ethernet-1/1]", false},
+		{"set / network-instance default protocols bgp autonomous-system 65001", "bgp", true},
+		// JSON key/value lines (including YANG module prefixes & IPv6 preservation)
+		{`  "bgp": {`, "bgp", true},
+		{`  "srl_nokia-network-instance:bgp": {`, "bgp", true},
+		{`+ "name": "ethernet-1/1",`, "ethernet-1/1", true},
+		{`+ "name": "ethernet-1/10",`, "ethernet-1/1", false},
+		{`  "name": "ethernet-1/1",`, "/interface[name=ethernet-1/1]", true},
+		{`  "name": "ethernet-1/10",`, "/interface[name=ethernet-1/1]", false},
+		{`  "ip-prefix": "2001:db8::1/64",`, "2001:db8::1", true},
+		{`  "autonomous-system": 65002,`, "65002", true},
+	}
+
+	for _, tc := range cases {
+		if got := filter.LineMatchesQuery(tc.line, tc.query); got != tc.want {
+			t.Errorf("LineMatchesQuery(%q, %q) = %v, want %v", tc.line, tc.query, got, tc.want)
+		}
+	}
+	if !filter.JSONLineMatchesQuery(`  "srl_nokia-network-instance:bgp": {`, "bgp") {
+		t.Fatalf("JSONLineMatchesQuery failed to match namespaced JSON key")
+	}
+	if filter.JSONLineMatchesQuery(`  },`, "bgp") {
+		t.Fatalf("JSONLineMatchesQuery unexpectedly matched pure punctuation")
+	}
+	for _, hdr := range []struct{ line, q string }{
+		{"--- a/config.json", "config"},
+		{"+++ b/config.json", "config"},
+		{"@@ -1,4 +1,5 @@", "1"},
+	} {
+		if filter.JSONLineMatchesQuery(hdr.line, hdr.q) {
+			t.Fatalf("JSONLineMatchesQuery(%q, %q) unexpectedly matched diff header", hdr.line, hdr.q)
+		}
+	}
+}
+
+func TestDetailFilterBannerHitRangesAndZeroOverheadAcrossViews(t *testing.T) {
+	_ = SetColorProfile("truecolor")
+	_, _ = SetTheme("dark")
+
+	commit := &models.TimelineCommit{
+		CommitID:  "df3b5eca",
+		FullSHA:   "df3b5eca11111111111111111111111111111111",
+		Author:    "root",
+		Timestamp: time.Date(2026, 11, 24, 15, 0, 0, 0, time.UTC),
+	}
+	sampleCfg := map[string]interface{}{
+		"interface": []interface{}{
+			map[string]interface{}{"name": "ethernet-1/1", "admin-state": "enable", "description": "uplink"},
+			map[string]interface{}{"name": "ethernet-1/10", "admin-state": "enable", "description": "downlink"},
+		},
+		"system": map[string]interface{}{
+			"name": map[string]interface{}{"host-name": "leaf-01"},
+		},
+	}
+	sampleBlame := []models.BlameEntry{
+		{LineNumber: 1, CommitSHA: commit.FullSHA, Author: "root", Timestamp: commit.Timestamp, Content: "set / interface ethernet-1/1 admin-state enable"},
+		{LineNumber: 2, CommitSHA: commit.FullSHA, Author: "admin", Timestamp: commit.Timestamp, Content: "set / interface ethernet-1/10 admin-state enable"},
+		{LineNumber: 3, CommitSHA: commit.FullSHA, Author: "root", Timestamp: commit.Timestamp, Content: "set / network-instance default protocols bgp autonomous-system 65001"},
+	}
+
+	assertBannerPill := func(t *testing.T, label, renderedView string, innerW, bannerRow, sx, ex int, wantPill string, wantSubstrings []string) {
+		t.Helper()
+		lines := strings.Split(stripPolishANSI(renderedView), "\n")
+		outerRow := 1 + bannerRow // row 0 is top box border
+		if outerRow < 1 || outerRow >= len(lines)-1 {
+			t.Fatalf("[%s] outerRow=%d out of bounds (len=%d)", label, outerRow, len(lines))
+		}
+		rowRunes := []rune(lines[outerRow])
+		innerRunes := rowRunes[1 : len(rowRunes)-1]
+		innerPlain := string(innerRunes)
+		if gotW := lipgloss.Width(innerPlain); gotW != innerW {
+			t.Fatalf("[%s] banner inner width=%d, want %d (%q)", label, gotW, innerW, innerPlain)
+		}
+		if sx < 0 || ex <= sx || ex > len(innerRunes) {
+			t.Fatalf("[%s] invalid hit range [%d:%d] for inner len %d (%q)", label, sx, ex, len(innerRunes), innerPlain)
+		}
+		if got := string(innerRunes[sx:ex]); got != wantPill {
+			t.Fatalf("[%s] pill slice [%d:%d] = %q, want %q (banner=%q)", label, sx, ex, got, wantPill, innerPlain)
+		}
+		for _, sub := range wantSubstrings {
+			if !strings.Contains(innerPlain, sub) {
+				t.Fatalf("[%s] banner missing %q: %q", label, sub, innerPlain)
+			}
+		}
+	}
+
+	// --- 1. DiffView: zero overhead when unfiltered, scoped & full banners at wide (93) and narrow (43) ---
+	dv := NewDiffViewModel(93, 31)
+	dv.Commit = commit
+	dv.SetDiff(models.SemanticDiffResult{
+		HasChanges:   true,
+		AddedCount:   2,
+		CLIDiffLines: []string{"+ set / interface ethernet-1/1 admin-state enable", "+ set / interface ethernet-1/1 description uplink"},
+	})
+	if dv.HeaderRows() != 2 || dv.FilterBannerRow() != -1 {
+		t.Fatalf("DiffView unfiltered expected HeaderRows=2, FilterBannerRow=-1; got %d, %d", dv.HeaderRows(), dv.FilterBannerRow())
+	}
+	if sx, ex := dv.FilterBannerHitRange(); sx != -1 || ex != -1 {
+		t.Fatalf("DiffView unfiltered expected hit range (-1,-1), got (%d,%d)", sx, ex)
+	}
+
+	dv.FilterQuery = "ethernet-1/1"
+	dv.TotalUnfilteredChanges = 7
+	dv.DetailFilterBypass = false
+	dv.UpdateContent()
+	if dv.HeaderRows() != 3 || dv.FilterBannerRow() != 2 {
+		t.Fatalf("DiffView filtered expected HeaderRows=3, FilterBannerRow=2; got %d, %d", dv.HeaderRows(), dv.FilterBannerRow())
+	}
+	sx, ex := dv.FilterBannerHitRange()
+	assertBannerPill(t, "DiffView-wide-scoped", dv.View(), 93, dv.FilterBannerRow(), sx, ex,
+		`[\ Show Full Commit]`,
+		[]string{GlyphMilestone + " FILTERED", "'ethernet-1/1'", "Showing 2 of 7 changes", "(5 hidden)"})
+
+	dv.DetailFilterBypass = true
+	dv.UpdateContent()
+	sx, ex = dv.FilterBannerHitRange()
+	assertBannerPill(t, "DiffView-wide-full", dv.View(), 93, dv.FilterBannerRow(), sx, ex,
+		`[\ Re-scope 'ethernet-1/1']`,
+		[]string{GlyphLive + " FULL", "all 7 changes", "Timeline filtered by 'ethernet-1/1'"})
+
+	// Narrow 80x24 (innerW=43) compact pills
+	dvNarrow := NewDiffViewModel(43, 19)
+	dvNarrow.Commit = commit
+	dvNarrow.FilterQuery = "bgp"
+	dvNarrow.TotalUnfilteredChanges = 9
+	dvNarrow.SetDiff(models.SemanticDiffResult{HasChanges: true, AddedCount: 2, CLIDiffLines: []string{"+ set / bgp a", "+ set / bgp b"}})
+	sx, ex = dvNarrow.FilterBannerHitRange()
+	assertBannerPill(t, "DiffView-narrow-scoped", dvNarrow.View(), 43, dvNarrow.FilterBannerRow(), sx, ex,
+		`[\ Full]`, []string{"FILTERED", "2/9"})
+
+	dvNarrow.DetailFilterBypass = true
+	dvNarrow.UpdateContent()
+	sx, ex = dvNarrow.FilterBannerHitRange()
+	assertBannerPill(t, "DiffView-narrow-full", dvNarrow.View(), 43, dvNarrow.FilterBannerRow(), sx, ex,
+		`[\ Scope]`, []string{GlyphLive + " FULL"})
+
+	// --- 2. ConfigView: auto ShownLineCount / TotalUnfilteredLines in CLI & JSON + exact banners ---
+	cv := NewConfigViewModel(93, 31)
+	cv.Commit = commit
+	cv.SetConfig(sampleCfg, "")
+	if cv.HeaderRows() != 2 || cv.FilterBannerRow() != -1 {
+		t.Fatalf("ConfigView unfiltered expected HeaderRows=2, FilterBannerRow=-1; got %d, %d", cv.HeaderRows(), cv.FilterBannerRow())
+	}
+
+	cv.SetConfig(sampleCfg, "ethernet-1/1")
+	if cv.TotalUnfilteredLines <= cv.ShownLineCount || cv.ShownLineCount == 0 {
+		t.Fatalf("ConfigView CLI scoped expected 0 < Shown (%d) < Total (%d)", cv.ShownLineCount, cv.TotalUnfilteredLines)
+	}
+	if cv.HeaderRows() != 3 || cv.FilterBannerRow() != 2 {
+		t.Fatalf("ConfigView filtered expected HeaderRows=3, FilterBannerRow=2; got %d, %d", cv.HeaderRows(), cv.FilterBannerRow())
+	}
+	sx, ex = cv.FilterBannerHitRange()
+	assertBannerPill(t, "ConfigView-CLI-scoped", cv.View(), 93, cv.FilterBannerRow(), sx, ex,
+		`[\ Show Full Config]`,
+		[]string{GlyphMilestone + " FILTERED", "'ethernet-1/1'", fmt.Sprintf("Showing %d of %d lines", cv.ShownLineCount, cv.TotalUnfilteredLines), "hidden)"})
+
+	// Switch to Full Config (bypass)
+	cv.SetConfigScoped(sampleCfg, "ethernet-1/1", true)
+	if cv.ShownLineCount != cv.TotalUnfilteredLines {
+		t.Fatalf("ConfigView CLI bypass expected Shown (%d) == Total (%d)", cv.ShownLineCount, cv.TotalUnfilteredLines)
+	}
+	sx, ex = cv.FilterBannerHitRange()
+	assertBannerPill(t, "ConfigView-CLI-full", cv.View(), 93, cv.FilterBannerRow(), sx, ex,
+		`[\ Re-scope 'ethernet-1/1']`,
+		[]string{GlyphLive + " FULL", fmt.Sprintf("all %d lines", cv.TotalUnfilteredLines), "Timeline filtered by 'ethernet-1/1'"})
+
+	// JSON mode scoped count check
+	cv.FormatMode = "json"
+	cv.SetConfigScoped(sampleCfg, "ethernet-1/1", false)
+	if cv.TotalUnfilteredLines <= cv.ShownLineCount || cv.ShownLineCount == 0 {
+		t.Fatalf("ConfigView JSON scoped expected 0 < Shown (%d) < Total (%d)", cv.ShownLineCount, cv.TotalUnfilteredLines)
+	}
+
+	// --- 3. BlameView: zero overhead when unfiltered, banner above pinned header when filtered ---
+	bv := NewBlameViewModel(93, 31)
+	bv.Commit = commit
+	bv.SetBlame(sampleBlame, blame.ContributorStats{TotalLines: 3})
+	if bv.HeaderRows() != 3 || bv.FilterBannerRow() != -1 {
+		t.Fatalf("BlameView unfiltered expected HeaderRows=3 (toolbar+ctx+pinned), FilterBannerRow=-1; got %d, %d", bv.HeaderRows(), bv.FilterBannerRow())
+	}
+
+	bv.FilterQuery = "bgp"
+	bv.DetailFilterBypass = false
+	bv.TotalUnfilteredEntries = 3
+	bv.SetBlame(sampleBlame[2:], blame.ContributorStats{TotalLines: 3})
+	if bv.HeaderRows() != 4 || bv.FilterBannerRow() != 2 {
+		t.Fatalf("BlameView filtered expected HeaderRows=4, FilterBannerRow=2; got %d, %d", bv.HeaderRows(), bv.FilterBannerRow())
+	}
+	sx, ex = bv.FilterBannerHitRange()
+	assertBannerPill(t, "BlameView-scoped", bv.View(), 93, bv.FilterBannerRow(), sx, ex,
+		`[\ Show Full Blame]`,
+		[]string{GlyphMilestone + " FILTERED", "'bgp'", "Showing 1 of 3 lines", "(2 hidden)"})
+
+	bv.DetailFilterBypass = true
+	bv.SetBlame(sampleBlame, blame.ContributorStats{TotalLines: 3})
+	sx, ex = bv.FilterBannerHitRange()
+	assertBannerPill(t, "BlameView-full", bv.View(), 93, bv.FilterBannerRow(), sx, ex,
+		`[\ Re-scope 'bgp']`,
+		[]string{GlyphLive + " FULL", "all 3 lines", "Timeline filtered by 'bgp'"})
+}
+
+func TestDetailViewsCyanMatchingLineGutterMarkers(t *testing.T) {
+	_ = SetColorProfile("truecolor")
+	_, _ = SetTheme("dark")
+
+	// 1. DiffView single-pane CLI, Path, Unified JSON modes
+	dv := NewDiffViewModel(93, 31)
+	dv.FilterQuery = "ethernet-1/1"
+	dv.DetailFilterBypass = true
+	diffRes := models.SemanticDiffResult{
+		HasChanges: true,
+		AddedCount: 3,
+		CLIDiffLines: []string{
+			"+ set / interface ethernet-1/1 description uplink",
+			"+ set / interface ethernet-1/10 description downlink",
+			"+ set / system name host-name leaf-01",
+		},
+		Changes: []models.PathChange{
+			{Path: "/interface[name=ethernet-1/1]/description", DiffType: models.DiffAdded, NewValue: "uplink"},
+			{Path: "/interface[name=ethernet-1/10]/description", DiffType: models.DiffAdded, NewValue: "downlink"},
+			{Path: "/system/name/host-name", DiffType: models.DiffAdded, NewValue: "leaf-01"},
+		},
+		UnifiedDiffLines: []string{
+			"--- a/config.json",
+			"+++ b/config.json",
+			"@@ -1,2 +1,4 @@",
+			`+   "name": "ethernet-1/1",`,
+			`+   "name": "ethernet-1/10",`,
+			`    "host-name": "leaf-01"`,
+		},
+	}
+
+	for _, mode := range []string{"cli", "path", "unified"} {
+		dv.DiffMode = mode
+		dv.SetDiff(diffRes)
+		plainLines := strings.Split(stripPolishANSI(strings.Join(dv.renderedLines, "\n")), "\n")
+		var matchedHit, nonMatchedHit bool
+		for _, l := range plainLines {
+			if strings.Contains(l, "ethernet-1/1") && !strings.Contains(l, "ethernet-1/10") {
+				if strings.Contains(l, GlyphCollapsed) {
+					matchedHit = true
+				}
+			}
+			if strings.Contains(l, "ethernet-1/10") || strings.Contains(l, "host-name") || strings.Contains(l, "@@") || strings.Contains(l, "--- a/") {
+				if strings.Contains(l, GlyphCollapsed) {
+					t.Fatalf("DiffView(%s) non-matching line unexpectedly got %q marker: %q", mode, GlyphCollapsed, l)
+				}
+				nonMatchedHit = true
+			}
+		}
+		if !matchedHit || !nonMatchedHit {
+			t.Fatalf("DiffView(%s) expected matching marker (%v) and unmarked non-match (%v) in:\n%s",
+				mode, matchedHit, nonMatchedHit, strings.Join(plainLines, "\n"))
+		}
+	}
+
+	// 2. ConfigView CLI & JSON modes
+	cfg := map[string]interface{}{
+		"interface": []interface{}{
+			map[string]interface{}{"name": "ethernet-1/1", "description": "uplink"},
+			map[string]interface{}{"name": "ethernet-1/10", "description": "downlink"},
+		},
+		"system": map[string]interface{}{"name": map[string]interface{}{"host-name": "leaf-01"}},
+	}
+	for _, fmtMode := range []string{"cli", "json"} {
+		cv := NewConfigViewModel(93, 31)
+		cv.FormatMode = fmtMode
+		cv.SetConfigScoped(cfg, "ethernet-1/1", true)
+		plainLines := strings.Split(stripPolishANSI(strings.Join(cv.renderedLines, "\n")), "\n")
+		var matchedHit, nonMatchedHit bool
+		for _, l := range plainLines {
+			if strings.Contains(l, "ethernet-1/1") && !strings.Contains(l, "ethernet-1/10") {
+				if strings.Contains(l, GlyphCollapsed) {
+					matchedHit = true
+				}
+			}
+			if strings.Contains(l, "ethernet-1/10") || strings.Contains(l, "leaf-01") {
+				if strings.Contains(l, GlyphCollapsed) {
+					t.Fatalf("ConfigView(%s) non-matching line unexpectedly got %q marker: %q", fmtMode, GlyphCollapsed, l)
+				}
+				nonMatchedHit = true
+			}
+		}
+		if !matchedHit || !nonMatchedHit {
+			t.Fatalf("ConfigView(%s) expected matching marker (%v) and unmarked non-match (%v) in:\n%s",
+				fmtMode, matchedHit, nonMatchedHit, strings.Join(plainLines, "\n"))
+		}
+	}
+
+	// 3. BlameView Attribution mode + dirty check on DetailFilterBypass flip
+	bv := NewBlameViewModel(93, 31)
+	bv.FilterQuery = "bgp"
+	bv.DetailFilterBypass = false
+	bv.SetBlame([]models.BlameEntry{
+		{LineNumber: 1, CommitSHA: "df3b5eca11111111", Author: "root", Timestamp: time.Now(), Content: "set / interface ethernet-1/1 admin-state enable"},
+		{LineNumber: 2, CommitSHA: "df3b5eca11111111", Author: "admin", Timestamp: time.Now(), Content: "set / network-instance default protocols bgp autonomous-system 65001"},
+	}, blame.ContributorStats{TotalLines: 2})
+	// Flip DetailFilterBypass directly without calling UpdateContent() — View() dirty check must re-render!
+	bv.DetailFilterBypass = true
+	rendered := stripPolishANSI(bv.View())
+	var bgpMarked, ifaceUnmarked bool
+	for _, l := range strings.Split(rendered, "\n") {
+		if strings.Contains(l, "protocols bgp") && strings.Contains(l, GlyphCollapsed) {
+			bgpMarked = true
+		}
+		if strings.Contains(l, "ethernet-1/1") {
+			if strings.Contains(l, GlyphCollapsed) {
+				t.Fatalf("BlameView non-matching line unexpectedly got %q marker: %q", GlyphCollapsed, l)
+			}
+			ifaceUnmarked = true
+		}
+	}
+	if !bgpMarked || !ifaceUnmarked {
+		t.Fatalf("BlameView bypass View() expected bgpMarked=%v ifaceUnmarked=%v in:\n%s", bgpMarked, ifaceUnmarked, rendered)
+	}
+}
+
+func TestDetailFilterBannersFullBleedAcrossAll11Themes(t *testing.T) {
+	_ = SetColorProfile("truecolor")
+	defer func() {
+		_, _ = SetTheme("dark")
+	}()
+
+	commit := &models.TimelineCommit{
+		CommitID:  "df3b5eca",
+		FullSHA:   "df3b5eca11111111111111111111111111111111",
+		Author:    "root",
+		Timestamp: time.Now().Add(-20 * time.Minute),
+	}
+	cfg := map[string]interface{}{
+		"interface": []interface{}{
+			map[string]interface{}{"name": "ethernet-1/1", "admin-state": "enable"},
+			map[string]interface{}{"name": "ethernet-1/10", "admin-state": "enable"},
+		},
+		"system": map[string]interface{}{"name": map[string]interface{}{"host-name": "leaf-01"}},
+	}
+	diffRes := models.SemanticDiffResult{
+		HasChanges: true,
+		AddedCount: 2,
+		CLIDiffLines: []string{
+			"+ set / interface ethernet-1/1 admin-state enable",
+			"+ set / system name host-name leaf-01",
+		},
+	}
+	blameEntries := []models.BlameEntry{
+		{LineNumber: 1, CommitSHA: commit.FullSHA, Author: "root", Timestamp: commit.Timestamp, Content: "set / interface ethernet-1/1 admin-state enable"},
+		{LineNumber: 2, CommitSHA: commit.FullSHA, Author: "admin", Timestamp: commit.Timestamp, Content: "set / system name host-name leaf-01"},
+	}
+
+	for _, th := range AvailableThemes() {
+		_, ok := SetTheme(th.Name)
+		if !ok {
+			t.Fatalf("failed to set theme %q", th.Name)
+		}
+		for _, bypass := range []bool{false, true} {
+			for _, sz := range [][2]int{{43, 19}, {93, 31}} {
+				w, h := sz[0], sz[1]
+
+				dv := NewDiffViewModel(w, h)
+				dv.IsFocused = true
+				dv.Commit = commit
+				dv.FilterQuery = "ethernet-1/1"
+				dv.DetailFilterBypass = bypass
+				dv.TotalUnfilteredChanges = 5
+				dv.SetDiff(diffRes)
+				assertNoUnrecoveredReset(t, fmt.Sprintf("%s-diff-banner-bypass%v-%dx%d", th.Name, bypass, w, h), dv.View(), w+2, h+2)
+
+				cv := NewConfigViewModel(w, h)
+				cv.IsFocused = true
+				cv.Commit = commit
+				cv.SetConfigScoped(cfg, "ethernet-1/1", bypass)
+				assertNoUnrecoveredReset(t, fmt.Sprintf("%s-config-banner-bypass%v-%dx%d", th.Name, bypass, w, h), cv.View(), w+2, h+2)
+
+				bv := NewBlameViewModel(w, h)
+				bv.IsFocused = true
+				bv.Commit = commit
+				bv.FilterQuery = "ethernet-1/1"
+				bv.DetailFilterBypass = bypass
+				bv.TotalUnfilteredEntries = 5
+				bv.SetBlame(blameEntries, blame.ContributorStats{TotalLines: 5})
+				assertNoUnrecoveredReset(t, fmt.Sprintf("%s-blame-banner-bypass%v-%dx%d", th.Name, bypass, w, h), bv.View(), w+2, h+2)
+			}
+		}
 	}
 }

@@ -512,3 +512,150 @@ func valueMatchesFilter(oldVal, newVal interface{}, queryTokens []string) bool {
 	}
 	return false
 }
+
+// LineMatchesQuery checks whether a single rendered CLI, XPath, or pretty-printed JSON line
+// matches filterQuery using the same tokenization and numeric-suffix-safe matching semantics
+// as FilterCLILines / IsPathMatching. Returns false when line or filterQuery is empty, or
+// when line is a diff header or pure JSON punctuation.
+func LineMatchesQuery(line, filterQuery string) bool {
+	trimmedQ := strings.TrimSpace(filterQuery)
+	trimmedL := strings.TrimSpace(line)
+	if trimmedQ == "" || trimmedL == "" {
+		return false
+	}
+	if strings.HasPrefix(trimmedL, "---") || strings.HasPrefix(trimmedL, "+++") || strings.HasPrefix(trimmedL, "@@") {
+		return false
+	}
+	queryTokens := TokenizePath(trimmedQ)
+	if len(queryTokens) == 0 {
+		return false
+	}
+	if isJSONLine(trimmedL) {
+		return jsonLineMatchesTokens(trimmedL, queryTokens)
+	}
+	if strings.HasPrefix(trimmedQ, "/") {
+		return isExactPrefixOf(queryTokens, TokenizePath(trimmedL))
+	}
+	return tokensMatch(queryTokens, TokenizePath(trimmedL))
+}
+
+// JSONLineMatchesQuery checks whether a pretty-printed JSON line (with optional leading +/- diff sign)
+// matches filterQuery using namespace-aware key and value token extraction.
+func JSONLineMatchesQuery(line, filterQuery string) bool {
+	trimmedQ := strings.TrimSpace(filterQuery)
+	trimmedL := strings.TrimSpace(line)
+	if trimmedQ == "" || trimmedL == "" {
+		return false
+	}
+	if strings.HasPrefix(trimmedL, "---") || strings.HasPrefix(trimmedL, "+++") || strings.HasPrefix(trimmedL, "@@") {
+		return false
+	}
+	queryTokens := TokenizePath(trimmedQ)
+	if len(queryTokens) == 0 {
+		return false
+	}
+	return jsonLineMatchesTokens(trimmedL, queryTokens)
+}
+
+func stripDiffLineSign(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "+") || strings.HasPrefix(s, "-") {
+		s = strings.TrimSpace(s[1:])
+	}
+	return s
+}
+
+func isJSONLine(trimmedL string) bool {
+	s := stripDiffLineSign(trimmedL)
+	if s == "" {
+		return false
+	}
+	switch s[0] {
+	case '"', '{', '}', '[', ']':
+		return true
+	default:
+		return false
+	}
+}
+
+func extractJSONLineTokens(trimmedL string) []string {
+	s := stripDiffLineSign(trimmedL)
+	if s == "" {
+		return nil
+	}
+	var tokens []string
+	n := len(s)
+	i := 0
+	for i < n {
+		ch := s[i]
+		if ch == ' ' || ch == '\t' || ch == '{' || ch == '}' || ch == '[' || ch == ']' || ch == ':' || ch == ',' {
+			i++
+			continue
+		}
+		if ch == '"' {
+			i++
+			start := i
+			for i < n {
+				if s[i] == '\\' && i+1 < n {
+					i += 2
+					continue
+				}
+				if s[i] == '"' {
+					break
+				}
+				i++
+			}
+			raw := s[start:i]
+			if i < n && s[i] == '"' {
+				i++
+			}
+			// Look ahead past spaces/tabs for ':' to distinguish JSON key from string value.
+			look := i
+			for look < n && (s[look] == ' ' || s[look] == '\t') {
+				look++
+			}
+			var clean string
+			if look < n && s[look] == ':' {
+				clean = strings.ToLower(strings.TrimSpace(normalizer.StripNamespace(raw)))
+			} else {
+				clean = strings.ToLower(strings.TrimSpace(normalizer.StripModulePrefixValue(raw)))
+			}
+			if clean != "" {
+				tokens = append(tokens, clean)
+			}
+			continue
+		}
+		// Unquoted scalar token (number, boolean, null)
+		start := i
+		for i < n && s[i] != ' ' && s[i] != '\t' && s[i] != ',' && s[i] != '}' && s[i] != ']' && s[i] != ':' {
+			i++
+		}
+		scalar := strings.ToLower(strings.TrimSpace(s[start:i]))
+		if scalar != "" {
+			tokens = append(tokens, scalar)
+		}
+	}
+	return tokens
+}
+
+func jsonLineMatchesTokens(trimmedL string, queryTokens []string) bool {
+	tokens := extractJSONLineTokens(trimmedL)
+	if len(tokens) == 0 {
+		return false
+	}
+	if tokensMatch(queryTokens, tokens) {
+		return true
+	}
+	// Multi-token path/CLI queries (e.g. "/interface[name=ethernet-1/1]" or "network-instance bgp")
+	// span multiple pretty-printed JSON lines; match the most specific terminal query token
+	// against the line's extracted keys/values with numeric-suffix safety.
+	if len(queryTokens) > 1 {
+		lastTok := queryTokens[len(queryTokens)-1]
+		for _, t := range tokens {
+			if tokenSegmentMatches(t, lastTok) {
+				return true
+			}
+		}
+	}
+	return false
+}

@@ -208,14 +208,174 @@ func (d *TimelineDaemon) Stop() {
 	close(d.stopChan)
 }
 
+func (d *TimelineDaemon) resolveWatchTargets() (logPath, cfgPath string) {
+	if d.SRLClient != nil && !d.SRLClient.IsOnBox && d.ConfigWatchPath == "" && len(d.LogWatchPaths) == 0 {
+		return "", ""
+	}
+	cfgCandidate := d.ConfigWatchPath
+	if cfgCandidate == "" {
+		cfgCandidate = "/etc/opt/srlinux/config.json"
+	}
+	if _, err := os.Stat(cfgCandidate); err == nil {
+		cfgPath = cfgCandidate
+	}
+	logCandidates := d.LogWatchPaths
+	if len(logCandidates) == 0 {
+		logCandidates = []string{
+			"/var/log/srlinux/buffer/messages",
+			"/var/log/messages",
+		}
+	}
+	for _, p := range logCandidates {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			logPath = p
+			break
+		}
+	}
+	return logPath, cfgPath
+}
+
+func initLogTailPosition(path string) (inode uint64, offset int64) {
+	if path == "" {
+		return 0, 0
+	}
+	fi, err := os.Stat(path)
+	if err != nil || fi.IsDir() {
+		return 0, 0
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		inode = st.Ino
+	}
+	return inode, fi.Size()
+}
+
+func logTailHasCommit(path string, lastInode *uint64, lastOffset *int64) bool {
+	if path == "" {
+		return false
+	}
+	fi, err := os.Stat(path)
+	if err != nil || fi.IsDir() {
+		return false
+	}
+	var inode uint64
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		inode = st.Ino
+	}
+	size := fi.Size()
+	if inode != *lastInode || size < *lastOffset {
+		*lastInode = inode
+		*lastOffset = 0
+	}
+	if size <= *lastOffset {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	readOffset := *lastOffset
+	if readOffset == 0 && size > 65536 {
+		readOffset = size - 65536
+	}
+	if _, err := f.Seek(readOffset, io.SeekStart); err != nil {
+		return false
+	}
+	buf, err := io.ReadAll(f)
+	if err != nil {
+		return false
+	}
+	*lastOffset = readOffset + int64(len(buf))
+	s := string(buf)
+	return strings.Contains(s, "commitSucceeded") || strings.Contains(s, "committed successfully")
+}
+
 func (d *TimelineDaemon) monitorLoop() {
-	ticker := time.NewTicker(1500 * time.Millisecond)
+	logPath, cfgPath := d.resolveWatchTargets()
+	var targets []string
+	var resolvedLogPath string
+	if logPath != "" {
+		targets = append(targets, logPath)
+		if eval, err := filepath.EvalSymlinks(logPath); err == nil && eval != "" {
+			resolvedLogPath = eval
+		} else {
+			resolvedLogPath = logPath
+		}
+	}
+	if cfgPath != "" {
+		targets = append(targets, cfgPath)
+	}
+
+	tailInode, tailOffset := initLogTailPosition(resolvedLogPath)
+
+	var watcher *gitbackend.FileWatcher
+	var watchEvents <-chan string
+	fallbackInterval := 1500 * time.Millisecond
+	if len(targets) > 0 {
+		if w, err := gitbackend.NewFileWatcher(targets...); err == nil {
+			watcher = w
+			watchEvents = w.Events
+			// inotify accelerates commit detection to ~35ms; keep a 2s structured JSON-RPC
+			// /system/configuration/commit fallback as the version-proof source of truth.
+			fallbackInterval = 2 * time.Second
+			defer func() { _ = watcher.Close() }()
+		}
+	}
+
+	// Perform one immediate check on startup to catch any changes that happened while stopped.
+	d.checkAndRecordChange()
+
+	ticker := time.NewTicker(fallbackInterval)
 	defer ticker.Stop()
+
+	var retryTimer *time.Timer
+	var retryC <-chan time.Time
+	stopRetry := func() {
+		if retryTimer != nil {
+			if !retryTimer.Stop() {
+				select {
+				case <-retryTimer.C:
+				default:
+				}
+			}
+			retryTimer = nil
+			retryC = nil
+		}
+	}
+	defer stopRetry()
 
 	for {
 		select {
 		case <-d.stopChan:
 			return
+		case evPath, ok := <-watchEvents:
+			if !ok {
+				watchEvents = nil
+				continue
+			}
+			shouldCheck := false
+			if resolvedLogPath != "" && filepath.Base(evPath) == filepath.Base(resolvedLogPath) {
+				shouldCheck = logTailHasCommit(resolvedLogPath, &tailInode, &tailOffset)
+			} else {
+				shouldCheck = true
+			}
+			if !shouldCheck {
+				continue
+			}
+			if !d.checkAndRecordChange() {
+				// If syslog flushed slightly before state datastore updated or a restore held the lock,
+				// schedule one quick 250ms re-check.
+				stopRetry()
+				retryTimer = time.NewTimer(250 * time.Millisecond)
+				retryC = retryTimer.C
+			} else {
+				stopRetry()
+			}
+		case <-retryC:
+			retryTimer = nil
+			retryC = nil
+			d.checkAndRecordChange()
 		case <-ticker.C:
 			d.checkAndRecordChange()
 		}
@@ -323,18 +483,18 @@ func (d *TimelineDaemon) hasNewCommitEvent() bool {
 	return changed
 }
 
-func (d *TimelineDaemon) checkAndRecordChange() {
+func (d *TimelineDaemon) checkAndRecordChange() bool {
 	unlock, acquired := TryAcquireRepoRecordLock(d.repoDir())
 	if !acquired {
 		// Another daemon or TUI/CLI restore instance is actively checking/recording
-		return
+		return false
 	}
 	defer unlock()
 
 	// If repository has no baseline commit yet, capture it now!
 	if !d.GitBackend.HasCommits() {
 		d.captureInitialStateLocked()
-		return
+		return d.GitBackend.HasCommits()
 	}
 
 	prevInit := d.initializedWatch
@@ -345,7 +505,7 @@ func (d *TimelineDaemon) checkAndRecordChange() {
 	prevLogOffset := d.lastLogOffset
 
 	if !d.hasNewCommitEvent() {
-		return
+		return false
 	}
 
 	restoreWatchCursor := func() {
@@ -360,7 +520,7 @@ func (d *TimelineDaemon) checkAndRecordChange() {
 	runningCfg, err := d.SRLClient.GetRunningConfig("/")
 	if err != nil || len(runningCfg) == 0 {
 		restoreWatchCursor()
-		return
+		return false
 	}
 
 	// Correlate author, commit ID, comment, and timestamp from native /system/configuration/commit state
@@ -419,13 +579,13 @@ func (d *TimelineDaemon) checkAndRecordChange() {
 	)
 	if err != nil {
 		restoreWatchCursor()
-		return
+		return false
 	}
 
 	if recorded && sha != "" {
 		if tl := d.GitBackend.GetTimeline(1, ""); len(tl) > 0 && tl[0].FullSHA == sha {
 			d.notifyListeners(tl[0])
-			return
+			return true
 		}
 		shortSHA := sha
 		if len(shortSHA) > 8 {
@@ -449,7 +609,9 @@ func (d *TimelineDaemon) checkAndRecordChange() {
 			IsCurrent:   true,
 		}
 		d.notifyListeners(commitObj)
+		return true
 	}
+	return false
 }
 
 // WriteCurrentPIDFile writes the current process PID to DefaultPIDFile, SharedPIDFile, or FallbackPIDFile.

@@ -2,19 +2,20 @@
 
 A configuration timeline and version history tool for Nokia SR Linux using Git.
 
-`timeline` automatically tracks configuration changes on Nokia SR Linux switches into an on-box Git repository. It provides an interactive Terminal User Interface (TUI) as the primary way to interact with the switch's history, along with command-line tools to view historical commits, inspect semantic diffs, trace line attribution, restore configurations, and synchronize with remote Git repositories.
+`timeline` automatically tracks configuration changes on Nokia SR Linux switches into an on-box Git repository. It provides an interactive Terminal User Interface (TUI) launched directly from `sr_cli` (`tools timeline`) or Linux bash (`timeline`), along with command-line tools to view historical commits, inspect semantic diffs, trace line attribution, restore configurations, and synchronize with remote Git repositories.
 
 ## Features
 
-- **Commit History & Visual Timeline**: Automatically records configuration commits with author identity, timestamps, diff statistics, and commit comments.
+- **Interactive Focus+Context Visual Timeline**: Horizontal timeline ribbon with a change-magnitude histogram, commit markers, and overview scrubber (`WINDOW ░▒◄═══►▒░`). Brush-select custom time windows by clicking and dragging, double-click anywhere to zoom progressively deeper into commit clusters, or jump via preset chips (`[1h]` `[24h]` `[7d]` `[All]` `[Fit]`).
+- **Side-by-Side Split Diff & 2-Config Compare**: Compare any two historical revisions—or any revision against the switch's live `● RUNNING CONFIG`—in Single-Pane or Side-by-Side Split Diff (`S`) across **JSON**, **Path Changes**, and **Flat CLI** (`set` / `delete`) views, with a **Folded ↔ Full Config** (`E`) toggle and a unified 2-configuration picker (`A` / `B`).
+- **Decoupled Path Filtering & Collapsible Left Panel**: Filter the timeline and commit list by subtree or keyword (`/` — e.g. `interface ethernet-1/1`, `bgp`, `acl`) while independently toggling full commit/config/blame context (`\`) with highlighted match markers (`▸`). Collapse or expand the Left Commit Panel at any time (`[◀]` / `▶` rail or `z`)—including alongside Side-by-Side Split Diff.
+- **Event-Driven Instant Live Updates**: The background daemon pairs authoritative SR Linux JSON-RPC commit history over the local Unix socket (`/opt/srlinux/var/run/sr_json_rpc`) with Linux `inotify` triggers, while the TUI watches `.git/refs` directly via `inotify` so live CLI commits, rollbacks, and cherry-picks appear almost immediately.
+- **Native SR Linux CLI Integration (`tools timeline`)**: Ships an `sr_cli` `ToolsPlugin` (`cli-plugins/timeline.py`) supporting tab-completed `filter`, `theme`, and `color-profile` options directly inside the SR Linux CLI.
 - **Pure-Go Native Git Engine**: Writes and reads standard Git loose objects (`blob`, `tree`, `commit`) and refs directly in Go under `/etc/opt/srlinux/timeline`. Does **not** require an external `git` binary on the switch for commit recording, history, diffing, blame, restore, or export (external `git` is only optional for SSH remote push).
-- **Semantic Configuration Diffs**: Compares revisions structurally in memory. Supports Unified Diff (`unified` / `json`), Path Changes (`path`), and flat CLI (`cli`: `set` / `delete`) formats. Includes a **Live Compare Mode** to diff any past snapshot against the switch's live running configuration.
-- **Scoped Path Filtering**: Filter the timeline, diffs, and full configuration to specific subtrees or interfaces (e.g., `interface ethernet-1/1`, `bgp`, `acl`).
-- **Configuration Rollback & Cherry-Pick**: Roll back the switch to a past revision or interactively cherry-pick and apply specific configuration subtrees.
-- **Configuration Blame**: Line-by-line attribution showing who modified each line or block of configuration and when.
-- **11 Built-in Color Themes & Full-Bleed TUI**: Cycle live through 11 curated dark and light themes (<kbd>T</kbd> in the TUI) or select via `--theme` / `TIMELINE_THEME` and `--color-profile` / `TIMELINE_COLOR_PROFILE`.
-- **Remote Git Synchronization**: Push configuration history to external Git repositories (GitHub, GitLab, etc.) with automated background push on commit.
-- **Configuration Export**: Export any historical commit as SR Linux startup JSON (`config.json`) or flat CLI scripts.
+- **Configuration Rollback & Cherry-Pick**: Roll back the switch to any historical revision or interactively cherry-pick and restore specific configuration subtrees.
+- **Configuration Blame & Analytics**: Line-by-line attribution showing who modified each line or block of configuration and when, plus per-author analytics.
+- **11 Built-in Color Themes & Full-Bleed TUI**: Cycle live through 11 curated dark and light themes (<kbd>T</kbd> or <kbd>Ctrl+t</kbd> in the TUI) or select via `--theme` / `TIMELINE_THEME` and `--color-profile` / `TIMELINE_COLOR_PROFILE`.
+- **Remote Git Synchronization & Export**: Push configuration history to external Git repositories (GitHub, GitLab, etc.) with optional automatic push on commit, or export any snapshot as SR Linux startup JSON (`config.json`) or flat CLI scripts.
 
 ![Timeline Image](images/timeline-image.png)
 
@@ -47,7 +48,12 @@ CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/timeline .
 ## 2. Install on the SR Linux Switch
 
 ### Method A: Debian Package Installation (Recommended)
-The `.deb` package installs `/usr/local/bin/timeline` and `/etc/opt/srlinux/appmgr/timeline_config.yml`, sets up multi-user repository permissions under `/etc/opt/srlinux/timeline`, enables the on-box JSON-RPC Unix domain socket (`/opt/srlinux/var/run/sr_json_rpc`), and automatically reloads `app_mgr`:
+The `.deb` package installs:
+- `/usr/local/bin/timeline` (static binary)
+- `/etc/opt/srlinux/appmgr/timeline_config.yml` (`app_mgr` daemon manifest)
+- `/opt/srl-timeline/cli-plugins/timeline.py` symlinked into `/etc/opt/srlinux/cli/plugins/timeline.py` (native `tools timeline` CLI plugin)
+
+It also configures multi-user repository permissions under `/etc/opt/srlinux/timeline`, enables the local JSON-RPC Unix domain socket (`/opt/srlinux/var/run/sr_json_rpc`), and reloads `app_mgr`:
 
 ```bash
 # 1. Copy the package from your workstation to the switch
@@ -57,17 +63,17 @@ scp dist/srl-timeline_0.0.4_amd64.deb admin@<switch-ip>:/tmp/
 sudo dpkg -i /tmp/srl-timeline_0.0.4_amd64.deb
 ```
 
+> **Tip**: After the first install, start a new `sr_cli` session so SR Linux loads the `tools timeline` CLI plugin.
+
 ### Method B: Manual Binary & App Manager Installation
-If you are installing the standalone binary manually, copy both `timeline` and `timeline_config.yml` to the switch so `app_mgr` runs the background recorder daemon:
+If you are installing the standalone binary manually, copy `timeline`, `timeline_config.yml`, and (optionally) `cli-plugins/timeline.py` to the switch:
 
 #### Step 1: SCP to the switch
-From your local workstation, copy the binary and `app_mgr` configuration to `/tmp` on the SR Linux switch:
 ```bash
-scp bin/timeline timeline_config.yml admin@<switch-ip>:/tmp/
+scp bin/timeline timeline_config.yml cli-plugins/timeline.py admin@<switch-ip>:/tmp/
 ```
 
 #### Step 2: Log into the switch, install, and bootstrap `timeline`
-Log into the switch, move the binary to `/usr/local/bin`, install `timeline_config.yml` into `/etc/opt/srlinux/appmgr/`, and bootstrap the daemon:
 
 - **From the SR Linux CLI**:
   ```text
@@ -75,14 +81,18 @@ Log into the switch, move the binary to `/usr/local/bin`, install `timeline_conf
   A:srl-timeline# bash sudo mv /tmp/timeline /usr/local/bin/timeline
   A:srl-timeline# bash sudo chmod +x /usr/local/bin/timeline
   A:srl-timeline# bash sudo mv /tmp/timeline_config.yml /etc/opt/srlinux/appmgr/timeline_config.yml
+  A:srl-timeline# bash sudo mkdir -p /etc/opt/srlinux/cli/plugins
+  A:srl-timeline# bash sudo mv /tmp/timeline.py /etc/opt/srlinux/cli/plugins/timeline.py
   A:srl-timeline# bash sudo timeline daemon bootstrap
   ```
 
-- **From the Linux Bash Shell** (if logged into bash directly):
+- **From the Linux Bash Shell**:
   ```bash
   sudo mv /tmp/timeline /usr/local/bin/timeline
   sudo chmod +x /usr/local/bin/timeline
   sudo mv /tmp/timeline_config.yml /etc/opt/srlinux/appmgr/timeline_config.yml
+  sudo mkdir -p /etc/opt/srlinux/cli/plugins
+  sudo mv /tmp/timeline.py /etc/opt/srlinux/cli/plugins/timeline.py
   sudo timeline daemon bootstrap
   ```
 
@@ -92,25 +102,28 @@ Log into the switch, move the binary to `/usr/local/bin`, install `timeline_conf
 
 The primary way to interact with `timeline` is through the visual **Terminal User Interface (TUI)**:
 
-- **If logged into the SR Linux CLI**:
+- **From the SR Linux CLI** (supports tab-completion for `theme` and `color-profile`):
   ```text
   --{ running }--[  ]--
-  A:srl-timeline# bash timeline
+  A:srl-timeline# tools timeline
+  A:srl-timeline# tools timeline filter bgp theme nord
+  A:srl-timeline# tools timeline filter "interface ethernet-1/1" theme cobalt2 color-profile truecolor
   ```
+  *(You can also launch via `bash timeline`.)*
 
-- **If logged into the SR Linux Bash Shell**:
+- **From the Linux Bash Shell**:
   ```bash
   timeline
+  timeline --filter "interface ethernet-1/1" --theme dracula
   ```
 
-You can also launch the TUI pre-filtered to a specific subsystem or interface, or with a specific color theme:
-```text
-# From SR Linux CLI
-bash timeline --filter "interface ethernet-1/1" --theme cobalt2
+---
 
-# From Linux Bash Shell
-timeline --filter "interface ethernet-1/1" --theme dracula
-```
+## How It Works
+
+1. **Background Recorder (`app_mgr`)**: `timeline daemon start` runs under SR Linux `app_mgr` (`timeline_config.yml`) and stores normalized snapshots (`config.json` and `config.cli`) in a pure-Go Git repository at `/etc/opt/srlinux/timeline`.
+2. **Authoritative Commit Metadata + `inotify` Fast-Path**: The daemon queries SR Linux's structured `/system/configuration/commit` state over the local JSON-RPC Unix domain socket (`/opt/srlinux/var/run/sr_json_rpc`, requiring no credentials) and pairs it with a Linux kernel `inotify` trigger on `/var/log/srlinux/file/messages` so commits are captured in milliseconds without brittle log parsing.
+3. **Instant TUI Refresh**: The interactive TUI watches `.git/refs/heads` and `.git/HEAD` via Linux `inotify` (with a background fallback ticker), automatically refreshing the commit list, expanding custom timeline windows when new live commits arrive, and keeping restores and cherry-picks immediately visible.
 
 ---
 
@@ -132,7 +145,7 @@ timeline --filter "interface ethernet-1/1" --theme dracula
 | `light` | GitHub Light | Light |
 | `solarized-light` | Solarized Light | Light |
 
-- **Cycle live in the TUI**: Press <kbd>T</kbd> (`Shift+t`) at any time in the TUI (or inside modals when a text input is not focused) to cycle through all 11 themes immediately.
+- **Cycle live or pick in the TUI**: Press <kbd>T</kbd> (`Shift+t`) to cycle through all 11 themes immediately, or <kbd>Ctrl+t</kbd> to open the Theme Picker modal.
 - **List available themes**:
   ```bash
   timeline themes
@@ -151,12 +164,14 @@ timeline --filter "interface ethernet-1/1" --theme dracula
 
 ## Direct Download One-Liner (Optional)
 
-If your SR Linux switch has direct outbound internet access, you can download and install the binary and `app_mgr` config directly on the switch:
+If your SR Linux switch has direct outbound internet access, you can download and install the binary, `app_mgr` config, and CLI plugin directly on the switch:
 
 ```bash
 sudo curl -sL https://github.com/andywhitaker/srl-timeline/releases/latest/download/timeline -o /usr/local/bin/timeline && \
 sudo chmod +x /usr/local/bin/timeline && \
 sudo curl -sL https://raw.githubusercontent.com/andywhitaker/srl-timeline/main/timeline_config.yml -o /etc/opt/srlinux/appmgr/timeline_config.yml && \
+sudo mkdir -p /etc/opt/srlinux/cli/plugins && \
+sudo curl -sL https://raw.githubusercontent.com/andywhitaker/srl-timeline/main/cli-plugins/timeline.py -o /etc/opt/srlinux/cli/plugins/timeline.py && \
 sudo timeline daemon bootstrap
 ```
 
@@ -182,6 +197,7 @@ topology:
       binds:
         - bin/timeline:/usr/local/bin/timeline
         - timeline_config.yml:/etc/opt/srlinux/appmgr/timeline_config.yml
+        - cli-plugins/timeline.py:/etc/opt/srlinux/cli/plugins/timeline.py
 ```
 
 > **Note**: An external `git` binary is only needed if you use `timeline remote push` (or auto-push) to synchronize commits to a remote SSH Git server.
@@ -194,23 +210,50 @@ topology:
 |---|---|
 | <kbd>j</kbd> / <kbd>↓</kbd> | Next commit in timeline (or scroll down in Detail pane) |
 | <kbd>k</kbd> / <kbd>↑</kbd> | Previous commit in timeline (or scroll up in Detail pane) |
-| <kbd>Tab</kbd> | Switch focus between Timeline pane and Details pane |
-| <kbd>d</kbd> | Switch to **Diff View** |
-| <kbd>c</kbd> | Switch to **Full Config View** |
-| <kbd>b</kbd> | Switch to **Blame View** |
-| <kbd>[</kbd> / <kbd>]</kbd> or <kbd>t</kbd> | Cycle through views (Diff $\rightarrow$ Config $\rightarrow$ Blame) |
-| <kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd> | Select sub-formats (Unified, Path Changes, Flat CLI in Diff; CLI, JSON in Config) |
-| <kbd>4</kbd> or <kbd>v</kbd> | Toggle **Live Compare Mode** (Revision vs Live Running Config) |
+| <kbd>PgUp</kbd> / <kbd>PgDn</kbd>, <kbd>Home</kbd> / <kbd>End</kbd> | Page scroll or jump to top / bottom of active pane |
+| <kbd>Tab</kbd> / <kbd>Shift+Tab</kbd> | Cycle focus across Timeline, Detail, and Visual Timeline Ribbon |
+| <kbd>←</kbd> / <kbd>→</kbd> | Focus Timeline/Detail pane (or step commits chronologically when Ribbon is focused) |
+| <kbd>d</kbd> / <kbd>c</kbd> / <kbd>b</kbd> / <kbd>t</kbd> | Switch Detail view (**Diff**, **Config**, **Blame**, or cycle next tab) |
+| <kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd> | Select sub-formats (**JSON**, **Path Changes**, **Flat CLI** in Diff; **CLI**, **JSON** in Config; **Attribution**, **Analytics** in Blame) |
+| <kbd>S</kbd> | Toggle **Single-Pane ↔ Side-by-Side Split Diff** (older `A` on left, newer `B` on right; requires ≥100 cols) |
+| <kbd>E</kbd> | Toggle **Folded** unchanged context ↔ **Full Config** (in Side-by-Side Split Diff) |
+| <kbd>A</kbd> / <kbd>B</kbd> | Open **Compare 2 Configurations** picker (`Space` toggles up to 2, `c` clears, `Enter` auto-assigns older→`A`, newer/`● RUNNING`→`B`) |
+| <kbd>m</kbd> | Pin / unpin compare anchor commit (`BASE`) |
+| <kbd>4</kbd> or <kbd>v</kbd> | Toggle **Live Compare Mode** (Revision vs `● RUNNING CONFIG`) |
+| <kbd>w</kbd> | Collapse / expand **Visual Timeline Ribbon** (toggles line wrap when focused in Blame view) |
+| <kbd>[</kbd> / <kbd>{</kbd> | Move timeline window **start** edge inward / outward |
+| <kbd>]</kbd> / <kbd>}</kbd> | Move timeline window **end** edge inward / outward |
+| <kbd>&lt;</kbd> / <kbd>&gt;</kbd> | Pan timeline window earlier / later |
+| <kbd>+</kbd> / <kbd>-</kbd> | Zoom timeline window in / out around selected commit |
+| <kbd>f</kbd> / <kbd>0</kbd> | Fit window to matching commits / Reset window to **All** history |
+| <kbd>z</kbd> | Collapse / expand Left Panel (full-width Detail **Zoom**) |
 | <kbd>/</kbd> | Focus search / path filter bar |
-| <kbd>Esc</kbd> | Clear filter / close modal |
+| <kbd>\\</kbd> | Toggle **Full Commit / Re-scope Detail** while keeping Timeline filtered (highlights matches with cyan `▸`) |
+| <kbd>Esc</kbd> | Unzoom / return focus / clear filter / close modal |
 | <kbd>r</kbd> | Open **Restore Modal** (Full configuration rollback) |
 | <kbd>p</kbd> | Open **Cherry-Pick Modal** (Interactive subtree restore) |
-| <kbd>R</kbd> / <kbd>F5</kbd> | Reload / refresh timeline from disk |
 | <kbd>e</kbd> | Open **Export Modal** (Save to file or startup config) |
 | <kbd>g</kbd> | Open **Remote Git Settings Modal** |
-| <kbd>T</kbd> | Cycle **Color Theme** live (`dark`, `cobalt2`, `monokai`, `solarized-dark`, `dracula`, `nord`, etc.) |
+| <kbd>R</kbd> / <kbd>F5</kbd> | Reload / refresh timeline from disk |
+| <kbd>T</kbd> / <kbd>Ctrl+t</kbd> | Cycle **Color Theme** live / Open Theme Picker Modal |
 | <kbd>?</kbd> | Display Help dialog |
 | <kbd>q</kbd> | Quit application |
+
+## TUI Mouse Controls
+
+| Gesture | Action |
+|---|---|
+| **Click & drag across Timeline Ribbon** | Brush-select a custom time window directly on the timeline |
+| **Double-click Timeline Ribbon** | Progressively zoom deeper into the commits clustered around that point |
+| **Drag `◄` / `►` handles or scrubber bar** | Resize or pan the active time window along the overview scrubber |
+| **Scroll wheel over Timeline Ribbon** | Zoom the active time window in or out |
+| **Click preset chips** | Jump instantly to `[1h]`, `[24h]`, `[7d]`, `[All]`, or `[Fit]` |
+| **`Ctrl+Click` / `Shift+Click` / `Alt+Click` / `Right-Click` a 2nd commit** | Open Side-by-Side Split Diff comparing that commit with the currently selected commit (older→`A`, newer→`B`) |
+| **Click any commit** | Select that commit (and return to Single Commit view if currently in Split Diff) |
+| **Click `[◀]` or collapsed `▶` rail** | Collapse or expand the Left Commit Panel independently in any view |
+| **Click `[A ▾]` / `[B ▾]` split headers** | Open the unified **Compare 2 Configurations** picker |
+| **Click FilterBar / Detail scope pill** | Toggle between filtered subset and full commit/config/blame view (`\`) |
+| **Click or drag any vertical scrollbar** | Jump to position or continuously scrub through Diff, Config, Blame, or Commit List |
 
 ---
 

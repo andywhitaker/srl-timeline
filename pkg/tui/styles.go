@@ -434,6 +434,14 @@ func PaintSurface(block string, width, height int, bg, defaultFg lipgloss.Color)
 	return modals.PaintSurface(block, width, height, bg, defaultFg)
 }
 
+func styleSGR(bg, fg lipgloss.Color, bold, italic, underline bool) string {
+	return modals.StyleSGR(bg, fg, bold, italic, underline)
+}
+
+func wrapSGR(sgr, text string) string {
+	return modals.WrapSGR(sgr, text)
+}
+
 // RenderTitledBox renders a rounded-border box with an embedded top-border title
 // (`╭─ <title> ───╮`, `│`, `╰───╯`) and exact outer dimensions width x height.
 // Every row preserves full-bleed ANSI background recovery across all color themes.
@@ -523,6 +531,71 @@ func RenderTitledBox(title string, body string, width, height int, borderFg lipg
 	return strings.Join(rows, "\n")
 }
 
+// ScrollbarMetrics computes the exact vertical thumb position and range for a viewport
+// scrollbar of the given track height, total line count, and current YOffset.
+func ScrollbarMetrics(height, totalLines, yOffset int) (thumbStart, thumbH, maxOffset, trackRange int) {
+	if height <= 0 || totalLines <= height {
+		return 0, height, 0, 0
+	}
+
+	thumbH = (height*height + totalLines/2) / totalLines
+	if thumbH < 1 {
+		thumbH = 1
+	}
+	if thumbH > height {
+		thumbH = height
+	}
+
+	maxOffset = totalLines - height
+	if yOffset < 0 {
+		yOffset = 0
+	}
+	if yOffset > maxOffset {
+		yOffset = maxOffset
+	}
+
+	trackRange = height - thumbH
+	if maxOffset > 0 && trackRange > 0 {
+		thumbStart = (yOffset*trackRange + maxOffset/2) / maxOffset
+		if thumbStart < 0 {
+			thumbStart = 0
+		}
+		if thumbStart > trackRange {
+			thumbStart = trackRange
+		}
+	}
+	return thumbStart, thumbH, maxOffset, trackRange
+}
+
+// ScrollbarYOffsetForThumb maps a thumb top row (0..trackRange) back to a viewport YOffset
+// (0..maxOffset) using the exact inverse rounding of ScrollbarMetrics.
+func ScrollbarYOffsetForThumb(thumbStart, height, totalLines int) int {
+	_, _, maxOffset, trackRange := ScrollbarMetrics(height, totalLines, 0)
+	if maxOffset <= 0 {
+		return 0
+	}
+	if trackRange <= 0 {
+		if thumbStart > 0 {
+			return maxOffset
+		}
+		return 0
+	}
+	if thumbStart <= 0 {
+		return 0
+	}
+	if thumbStart >= trackRange {
+		return maxOffset
+	}
+	yOff := (thumbStart*maxOffset + trackRange/2) / trackRange
+	if yOff < 0 {
+		return 0
+	}
+	if yOff > maxOffset {
+		return maxOffset
+	}
+	return yOff
+}
+
 // RenderScrollbar returns a height-element slice of 1-column-wide styled scrollbar cells
 // using █ (thumb) and ░ (track) painted on bg. When totalLines <= height, returns
 // blank cells painted on bg so short viewports stay visually quiet.
@@ -543,33 +616,7 @@ func RenderScrollbar(height, totalLines, yOffset int, bg lipgloss.Color) []strin
 		return cells
 	}
 
-	thumbH := (height*height + totalLines/2) / totalLines
-	if thumbH < 1 {
-		thumbH = 1
-	}
-	if thumbH > height {
-		thumbH = height
-	}
-
-	maxOffset := totalLines - height
-	if yOffset < 0 {
-		yOffset = 0
-	}
-	if yOffset > maxOffset {
-		yOffset = maxOffset
-	}
-
-	trackRange := height - thumbH
-	thumbStart := 0
-	if maxOffset > 0 && trackRange > 0 {
-		thumbStart = (yOffset*trackRange + maxOffset/2) / maxOffset
-		if thumbStart < 0 {
-			thumbStart = 0
-		}
-		if thumbStart > trackRange {
-			thumbStart = trackRange
-		}
-	}
+	thumbStart, thumbH, _, _ := ScrollbarMetrics(height, totalLines, yOffset)
 
 	thumbCell := lipgloss.NewStyle().Foreground(ColorActive).Background(bg).Render(GlyphScrollThumb)
 	trackCell := lipgloss.NewStyle().Foreground(ColorBorder).Background(bg).Render(GlyphScrollTrack)

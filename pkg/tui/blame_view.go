@@ -11,26 +11,31 @@ import (
 	"github.com/muesli/reflow/truncate"
 
 	"timeline/pkg/blame"
+	"timeline/pkg/filter"
 	"timeline/pkg/models"
 )
 
 // BlameViewModel manages the configuration blame view and contributor analytics.
 type BlameViewModel struct {
-	Entries      []models.BlameEntry
-	Stats        blame.ContributorStats
-	ViewMode     string // "attribution" (default), "analytics"
-	WrapLines    bool
-	SelectedLine int
-	FilterQuery  string
-	Zoomed       bool
-	Commit       *models.TimelineCommit
-	BaseCommit   *models.TimelineCommit
-	lastRendered string
-	emptyMsg     string
-	Viewport     viewport.Model
-	Width        int
-	Height       int
-	IsFocused    bool
+	Entries                []models.BlameEntry
+	Stats                  blame.ContributorStats
+	ViewMode               string // "attribution" (default), "analytics"
+	WrapLines              bool
+	SelectedLine           int
+	FilterQuery            string
+	DetailFilterBypass     bool
+	TotalUnfilteredEntries int
+	ShownEntryCount        int
+	Zoomed                 bool
+	Commit                 *models.TimelineCommit
+	BaseCommit             *models.TimelineCommit
+	lastRendered           string
+	renderedLines          []string
+	emptyMsg               string
+	Viewport               viewport.Model
+	Width                  int
+	Height                 int
+	IsFocused              bool
 
 	lineRowStarts       []int
 	lineRowEnds         []int
@@ -38,6 +43,12 @@ type BlameViewModel struct {
 	lastRenderedMode    string
 	lastRenderedWrap    bool
 	lastRenderedFilter  string
+	lastRenderedBypass  bool
+}
+
+func (m *BlameViewModel) setViewportLines(lines []string) {
+	m.renderedLines = lines
+	m.Viewport.SetContent(strings.Join(lines, "\n"))
 }
 
 // NewBlameViewModel creates a new blame viewer (defaulting to Attribution mode).
@@ -61,21 +72,72 @@ func (m BlameViewModel) hasContextStrip() bool {
 	return m.Height >= 16 && (m.Commit != nil || m.BaseCommit != nil)
 }
 
+func (m BlameViewModel) hasFilterBanner() bool {
+	return strings.TrimSpace(m.FilterQuery) != "" && m.Height >= 10
+}
+
 func (m BlameViewModel) hasPinnedHeader() bool {
 	return !m.isAnalytics() && m.emptyMsg == "" && len(m.Entries) > 0
 }
 
 // HeaderRows returns the number of inner rows above the scrollable viewport
-// (toolbar + optional context strip + optional pinned column header).
+// (toolbar + optional context strip + optional filter banner + optional pinned column header).
 func (m BlameViewModel) HeaderRows() int {
 	rows := 1 // toolbar
 	if m.hasContextStrip() {
+		rows++
+	}
+	if m.hasFilterBanner() {
 		rows++
 	}
 	if m.hasPinnedHeader() {
 		rows++
 	}
 	return rows
+}
+
+// FilterBannerRow returns the 0-based inner row index of the filter scope banner,
+// or -1 when no filter banner is displayed.
+func (m BlameViewModel) FilterBannerRow() int {
+	if !m.hasFilterBanner() {
+		return -1
+	}
+	if m.hasContextStrip() {
+		return 2
+	}
+	return 1
+}
+
+func (m BlameViewModel) buildFilterBanner(innerW int) (string, int, int) {
+	if !m.hasFilterBanner() {
+		return "", -1, -1
+	}
+	shown := m.ShownEntryCount
+	if shown <= 0 && len(m.Entries) > 0 {
+		shown = len(m.Entries)
+	}
+	total := m.TotalUnfilteredEntries
+	if total <= 0 && m.Stats.TotalLines > 0 {
+		total = m.Stats.TotalLines
+	}
+	if total < shown {
+		total = shown
+	}
+	return buildDetailFilterBanner(m.FilterQuery, m.DetailFilterBypass, shown, total, "lines", "Full Blame", innerW)
+}
+
+// FilterBannerHitRange returns the clickable [startX, endX) range of the Full Blame / Re-scope
+// toggle button on FilterBannerRow(), relative to inner pane X=0. Returns (-1, -1) if not shown.
+func (m BlameViewModel) FilterBannerHitRange() (startX, endX int) {
+	if !m.hasFilterBanner() {
+		return -1, -1
+	}
+	innerW := m.Width
+	if innerW < 1 {
+		innerW = 1
+	}
+	_, startX, endX = m.buildFilterBanner(innerW)
+	return startX, endX
 }
 
 func (m BlameViewModel) viewportWidth() int {
@@ -126,9 +188,14 @@ func (m *BlameViewModel) Clear(message string) {
 	m.Stats = blame.ContributorStats{}
 	m.Commit = nil
 	m.BaseCommit = nil
+	m.FilterQuery = ""
+	m.DetailFilterBypass = false
+	m.TotalUnfilteredEntries = 0
+	m.ShownEntryCount = 0
 	m.SelectedLine = 0
 	m.lineRowStarts = nil
 	m.lineRowEnds = nil
+	m.renderedLines = nil
 	m.lastRendered = ""
 	m.emptyMsg = strings.TrimSpace(message)
 	m.Viewport.SetYOffset(0)
@@ -216,12 +283,21 @@ func (m *BlameViewModel) ensureSelectedVisible() {
 	}
 }
 
-// SetSize handles terminal resizing.
+// SetSize handles terminal resizing without needlessly re-rendering when width is unchanged.
 func (m *BlameViewModel) SetSize(width, height int) {
+	if m.Width == width && m.Height == height {
+		return
+	}
+	prevW := m.Width
+	prevHasCtx := m.hasContextStrip()
+	prevHasBanner := m.hasFilterBanner()
 	m.Width = width
 	m.Height = height
 	m.Viewport.Width = m.viewportWidth()
 	m.Viewport.Height = m.viewportHeight()
+	if prevW == width && prevHasCtx == m.hasContextStrip() && prevHasBanner == m.hasFilterBanner() && m.lastRendered != "" {
+		return
+	}
 	m.lastRendered = ""
 	m.UpdateContent()
 }
@@ -331,29 +407,36 @@ func (m *BlameViewModel) UpdateContent() {
 	m.lastRenderedMode = m.ViewMode
 	m.lastRenderedWrap = m.WrapLines
 	m.lastRenderedFilter = m.FilterQuery
+	m.lastRenderedBypass = m.DetailFilterBypass
 
 	if m.emptyMsg != "" {
 		m.lastRendered = ""
 		m.lineRowStarts = nil
 		m.lineRowEnds = nil
 		msg := lipgloss.NewStyle().Foreground(ColorMuted).Render("  " + m.emptyMsg)
-		m.Viewport.SetContent(PaintLine("", wrapW, ColorPanel, ColorMuted) + "\n" + PaintLine(msg, wrapW, ColorPanel, ColorMuted))
+		m.setViewportLines([]string{
+			PaintLine("", wrapW, ColorPanel, ColorMuted),
+			PaintLine(msg, wrapW, ColorPanel, ColorMuted),
+		})
 		m.Viewport.SetYOffset(0)
 		return
 	}
 
-	if len(m.Entries) == 0 && (!m.isAnalytics() || m.Stats.TotalLines == 0 || strings.TrimSpace(m.FilterQuery) != "") {
+	if len(m.Entries) == 0 && (!m.isAnalytics() || m.Stats.TotalLines == 0 || (strings.TrimSpace(m.FilterQuery) != "" && !m.DetailFilterBypass)) {
 		m.lastRendered = ""
 		m.lineRowStarts = nil
 		m.lineRowEnds = nil
 		var msgText string
-		if q := strings.TrimSpace(m.FilterQuery); q != "" {
+		if q := strings.TrimSpace(m.FilterQuery); q != "" && !m.DetailFilterBypass {
 			msgText = fmt.Sprintf("  No blame entries match filter '%s'.", q)
 		} else {
 			msgText = "  No blame entries available."
 		}
 		msg := lipgloss.NewStyle().Foreground(ColorMuted).Render(msgText)
-		m.Viewport.SetContent(PaintLine("", wrapW, ColorPanel, ColorMuted) + "\n" + PaintLine(msg, wrapW, ColorPanel, ColorMuted))
+		m.setViewportLines([]string{
+			PaintLine("", wrapW, ColorPanel, ColorMuted),
+			PaintLine(msg, wrapW, ColorPanel, ColorMuted),
+		})
 		m.Viewport.SetYOffset(0)
 		return
 	}
@@ -371,6 +454,7 @@ func (m *BlameViewModel) renderAttributionContent(wrapW int) {
 	outLines := make([]string, 0, len(m.Entries)+2)
 	starts := make([]int, len(m.Entries))
 	ends := make([]int, len(m.Entries))
+	highlightMatches := m.DetailFilterBypass && strings.TrimSpace(m.FilterQuery) != ""
 
 	for i, e := range m.Entries {
 		isSelected := i == m.SelectedLine
@@ -383,20 +467,34 @@ func (m *BlameViewModel) renderAttributionContent(wrapW int) {
 			}
 		}
 
+		isMatch := highlightMatches && filter.LineMatchesQuery(e.Content, m.FilterQuery)
 		sp := lipgloss.NewStyle().Background(rowBg).Render(" ")
 		numStyle := lipgloss.NewStyle().Foreground(ColorTextDim).Background(rowBg)
 		pipeStyle := lipgloss.NewStyle().Foreground(ColorBorder).Background(rowBg)
+		if isMatch {
+			numStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorCyan).Background(rowBg)
+			pipeStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorCyan).Background(rowBg)
+		}
 
 		var prefix strings.Builder
 		if cols.gutterW > 0 {
 			if cols.usePipe {
+				glyph := GlyphPipe
+				if isMatch {
+					glyph = GlyphCollapsed
+				}
 				prefix.WriteString(numStyle.Render(fmt.Sprintf("%*d", cols.gutterDigits, i+1)))
 				prefix.WriteString(sp)
-				prefix.WriteString(pipeStyle.Render(GlyphPipe))
+				prefix.WriteString(pipeStyle.Render(glyph))
 				prefix.WriteString(sp)
 			} else {
 				prefix.WriteString(numStyle.Render(fmt.Sprintf("%*d", cols.gutterDigits, i+1)))
-				prefix.WriteString(lipgloss.NewStyle().Background(rowBg).Render("  "))
+				if isMatch {
+					prefix.WriteString(pipeStyle.Render(GlyphCollapsed))
+					prefix.WriteString(sp)
+				} else {
+					prefix.WriteString(lipgloss.NewStyle().Background(rowBg).Render("  "))
+				}
 			}
 		}
 
@@ -499,9 +597,11 @@ func (m *BlameViewModel) renderAttributionContent(wrapW int) {
 
 	content := strings.Join(outLines, "\n")
 	if m.lastRendered == content {
+		m.renderedLines = outLines
 		return
 	}
 	m.lastRendered = content
+	m.renderedLines = outLines
 	prevY := m.Viewport.YOffset
 	m.Viewport.SetContent(content)
 	if prevY > 0 {
@@ -522,16 +622,17 @@ func (m *BlameViewModel) renderAnalyticsContent(wrapW int) {
 	m.lineRowEnds = nil
 
 	filterQ := strings.TrimSpace(m.FilterQuery)
+	scopedFilter := filterQ != "" && !m.DetailFilterBypass
 	stats := m.Stats
-	if filterQ != "" || (stats.TotalLines == 0 && len(m.Entries) > 0) {
+	if scopedFilter || (stats.TotalLines == 0 && len(m.Entries) > 0) {
 		stats = computeStatsFromEntries(m.Entries)
 	}
 
 	var outLines []string
 
-	// Title header (with filtered annotation when FilterQuery is active)
+	// Title header (with filtered annotation when scoped FilterQuery is active)
 	title := "CONTRIBUTOR ANALYTICS & SUBSYSTEM BREAKDOWN"
-	if filterQ != "" {
+	if scopedFilter {
 		title = fmt.Sprintf("CONTRIBUTOR ANALYTICS (filtered: %s)", filterQ)
 	}
 	outLines = append(outLines,
@@ -660,9 +761,11 @@ func (m *BlameViewModel) renderAnalyticsContent(wrapW int) {
 
 	content := strings.Join(outLines, "\n")
 	if m.lastRendered == content {
+		m.renderedLines = outLines
 		return
 	}
 	m.lastRendered = content
+	m.renderedLines = outLines
 	prevY := m.Viewport.YOffset
 	m.Viewport.SetContent(content)
 	if prevY > 0 {
@@ -779,7 +882,8 @@ func (m BlameViewModel) View() string {
 	if m.IsFocused != m.lastRenderedFocused ||
 		m.ViewMode != m.lastRenderedMode ||
 		m.WrapLines != m.lastRenderedWrap ||
-		m.FilterQuery != m.lastRenderedFilter {
+		m.FilterQuery != m.lastRenderedFilter ||
+		m.DetailFilterBypass != m.lastRenderedBypass {
 		m.lastRendered = ""
 		m.UpdateContent()
 	}
@@ -800,6 +904,10 @@ func (m BlameViewModel) View() string {
 	if m.hasContextStrip() {
 		sections = append(sections, renderCommitContextStrip(m.Commit, m.BaseCommit, false, nil, innerW))
 	}
+	if m.hasFilterBanner() {
+		bannerLine, _, _ := m.buildFilterBanner(innerW)
+		sections = append(sections, bannerLine)
+	}
 	if m.hasPinnedHeader() {
 		sections = append(sections, m.renderPinnedHeader(innerW))
 	}
@@ -808,7 +916,7 @@ func (m BlameViewModel) View() string {
 	if vpH < 1 {
 		vpH = 1
 	}
-	vpView := renderViewportWithScrollbar(m.Viewport, innerW, vpH, ColorPanel)
+	vpView := renderLinesWithScrollbar(m.renderedLines, m.Viewport, innerW, vpH, ColorPanel)
 	sections = append(sections, vpView)
 
 	body := strings.Join(sections, "\n")

@@ -527,11 +527,13 @@ func TestHelpModalCategoriesScrollAndKeybindings(t *testing.T) {
 	hm := NewHelpModal(120, 35)
 	plain := stripANSI(hm.View())
 
-	// Must have all 3 categories and user-chosen keybindings
+	// Must have all categories and user-chosen keybindings (including Timeline Window, Split Diff & Mouse)
 	mustContain := []string{
 		"Navigation & Panes",
+		"Timeline Window",
 		"Views & Compare",
 		"Actions & Modals",
+		"Mouse Controls",
 		"Remote Git Sync",
 		"Ctrl+t",
 		"Zoom",
@@ -540,6 +542,27 @@ func TestHelpModalCategoriesScrollAndKeybindings(t *testing.T) {
 		"Toggle vs Running Config",
 		"Shift+Tab",
 		"Cherry-Pick",
+		"Collapse/expand Timeline ribbon",
+		"[ / {",
+		"] / }",
+		"< / >",
+		"+ / -",
+		"f / 0",
+		"d / c / b / t",
+		"Split Diff (A older | B newer)",
+		"Split: Folded ↔ Full Config",
+		"A / B",
+		"Drag timeline",
+		"Brush window / drag ◄/►/bar",
+		"Double-click",
+		"Ctrl/Shift",
+		"Click 2nd commit to split diff",
+		"Collapse / expand left panel",
+		"1h/24h/7d/All/Fit",
+		"[A ▾] / [B ▾]",
+		"Toggle Full Commit / Re-scope",
+		"Scope pill",
+		"Click FilterBar/Detail banner",
 		"Press [Esc], [Enter], or [?] to close",
 	}
 	for _, s := range mustContain {
@@ -547,7 +570,10 @@ func TestHelpModalCategoriesScrollAndKeybindings(t *testing.T) {
 			t.Fatalf("HelpModal missing expected text %q:\n%s", s, plain)
 		}
 	}
-	// Must NOT advertise Vim g/G jump bindings
+	// Must NOT advertise repurposed [ / ] tab cycling or Vim g/G jump bindings
+	if strings.Contains(plain, "Cycle detail tabs") {
+		t.Fatalf("HelpModal must not advertise repurposed [ / ] tab cycling:\n%s", plain)
+	}
 	if strings.Contains(plain, "Home / g") || strings.Contains(plain, "End / G") {
 		t.Fatalf("HelpModal must not include Vim g/G jump bindings:\n%s", plain)
 	}

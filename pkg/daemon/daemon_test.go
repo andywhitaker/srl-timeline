@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"timeline/pkg/gitbackend"
+	"timeline/pkg/models"
 	"timeline/pkg/srlclient"
 )
 
@@ -262,5 +263,128 @@ func TestRecordLockExclusion(t *testing.T) {
 	_, ok2 := TryAcquireRecordLock()
 	if ok2 {
 		t.Fatalf("expected second concurrent TryAcquireRecordLock to fail while lock is held")
+	}
+}
+
+func TestDaemonInotifyInstantCommitDetection(t *testing.T) {
+	tmpDir := t.TempDir()
+	sockPath := filepath.Join(tmpDir, "sr_json_rpc")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("failed to listen on unix socket: %v", err)
+	}
+	defer ln.Close()
+
+	logFile := filepath.Join(tmpDir, "messages")
+	if err := os.WriteFile(logFile, []byte("boot ok\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	hostName := "leaf-01"
+	commitList := []interface{}{
+		map[string]interface{}{
+			"id":       float64(1),
+			"username": "admin",
+			"comment":  "initial",
+			"ended":    "2026-11-25T20:00:00Z",
+			"status":   "complete",
+		},
+	}
+
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			params, _ := req["params"].(map[string]interface{})
+			cmds, _ := params["commands"].([]interface{})
+			mu.Lock()
+			defer mu.Unlock()
+			if len(cmds) > 0 {
+				cmd0, _ := cmds[0].(map[string]interface{})
+				if cmd0["path"] == "/" {
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						"jsonrpc": "2.0",
+						"id":      1,
+						"result": []interface{}{
+							map[string]interface{}{
+								"system": map[string]interface{}{
+									"name": map[string]interface{}{"host-name": hostName},
+								},
+							},
+						},
+					})
+					return
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      1,
+				"result": []interface{}{
+					map[string]interface{}{"commit": commitList},
+				},
+			})
+		}),
+	}
+	go func() { _ = srv.Serve(ln) }()
+	defer srv.Close()
+
+	client := srlclient.NewSRLClient()
+	client.IsOnBox = true
+	client.UnixSocketPath = sockPath
+	backend := gitbackend.NewGitBackend(filepath.Join(tmpDir, "repo"))
+	d := NewTimelineDaemon(client, backend)
+	d.LogWatchPaths = []string{logFile}
+
+	gotCommit := make(chan string, 4)
+	d.RegisterListener(func(c models.TimelineCommit) {
+		gotCommit <- c.FullSHA
+	})
+
+	d.Start()
+	defer d.Stop()
+
+	// Wait briefly for baseline + inotify attachment
+	deadline := time.Now().Add(1 * time.Second)
+	for !backend.HasCommits() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !backend.HasCommits() {
+		t.Fatalf("expected baseline commit on Start()")
+	}
+	time.Sleep(30 * time.Millisecond)
+
+	// Simulate live SR Linux commit: update running config + append commitSucceeded to messages.
+	mu.Lock()
+	hostName = "leaf-02"
+	commitList = append(commitList, map[string]interface{}{
+		"id":       float64(2),
+		"username": "admin",
+		"comment":  "instant live change",
+		"ended":    "2026-11-25T21:30:00Z",
+		"status":   "complete",
+	})
+	mu.Unlock()
+
+	t0 := time.Now()
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString("2026-11-25T21:30:00Z srl sr_mgmt_server: mgmt|1|1|00002|EV|commitSucceeded|I: All changes have been committed successfully by user admin session 5.\n")
+	_ = f.Close()
+
+	// Must trigger via inotify well under 500ms (fallback ticker is 5s!).
+	select {
+	case sha := <-gotCommit:
+		elapsed := time.Since(t0)
+		if sha == "" {
+			t.Fatalf("expected non-empty recorded SHA")
+		}
+		if elapsed > 1*time.Second {
+			t.Fatalf("expected sub-second inotify commit detection, took %v", elapsed)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timed out waiting for inotify commit detection (should be <100ms, fallback ticker is 5s)")
 	}
 }

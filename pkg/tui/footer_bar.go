@@ -9,14 +9,19 @@ import (
 // FooterContext describes the active application state for rendering contextual
 // keybinding hints or an inline single-row toast without vertical layout shifts.
 type FooterContext struct {
-	FilterActive bool
-	FocusedPane  int    // 0=timeline, 1=detail, 2=filter
-	ActiveTab    int    // 0=diff, 1=config, 2=blame
-	Zoomed       bool
-	HasBase      bool
-	VsLive       bool
-	ToastText    string
-	ToastKind    string // "primary", "info", "success", "warning", "error"
+	FilterActive    bool
+	DetailBypass    bool
+	FocusedPane     int    // 0=timeline, 1=detail, 2=filter, 3=ribbon
+	ActiveTab       int    // 0=diff, 1=config, 2=blame
+	Zoomed          bool
+	HasBase         bool
+	VsLive          bool
+	SplitMode       bool
+	FoldUnchanged   bool
+	RibbonCollapsed bool
+	WindowNarrowed  bool // true when time window < All history
+	ToastText       string
+	ToastKind       string // "primary", "info", "success", "warning", "error"
 }
 
 // FooterBarModel renders contextual keybinding shortcuts and inline toasts at the bottom.
@@ -189,7 +194,44 @@ func buildFooterShortcuts(ctx FooterContext) (primary []footerShortcut, trailing
 		zoomDesc = "Unzoom"
 	}
 
+	ribbonToggleDesc := "Timeline"
+	if ctx.RibbonCollapsed {
+		ribbonToggleDesc = "Expand TL"
+	}
+
+	scopeShortcut := footerShortcut{"\\", "Full Commit"}
+	if ctx.DetailBypass {
+		scopeShortcut = footerShortcut{"\\", "Scope Filter"}
+	}
+
 	switch ctx.FocusedPane {
+	case 3: // PaneRibbon (Visual Timeline Ribbon)
+		ribbonCollapseDesc := "Collapse"
+		if ctx.RibbonCollapsed {
+			ribbonCollapseDesc = "Expand"
+		}
+		splitDesc := "Split"
+		if ctx.SplitMode {
+			splitDesc = "Single"
+		}
+		primary = []footerShortcut{
+			{"←/→", "Select"},
+		}
+		if ctx.FilterActive {
+			primary = append(primary, scopeShortcut)
+		}
+		primary = append(primary,
+			footerShortcut{"[/]", "Edges"},
+			footerShortcut{"</>", "Pan"},
+			footerShortcut{"+/-", "Zoom"},
+			footerShortcut{"f", "Fit"},
+			footerShortcut{"0", "All"},
+			footerShortcut{"w", ribbonCollapseDesc},
+			footerShortcut{"S", splitDesc},
+			footerShortcut{"Tab", "Pane"},
+		)
+		return primary, trailing
+
 	case 2: // PaneFilter
 		primary = []footerShortcut{
 			{"Enter", "Apply"},
@@ -199,7 +241,42 @@ func buildFooterShortcuts(ctx FooterContext) (primary []footerShortcut, trailing
 		return primary, trailing
 
 	case 1: // PaneDetail
+		if ctx.ActiveTab == 0 && ctx.SplitMode {
+			foldDesc := "Expand"
+			if !ctx.FoldUnchanged {
+				foldDesc = "Fold"
+			}
+			liveDesc := "B=Running"
+			if ctx.VsLive {
+				liveDesc = "B=Commit"
+			}
+			primary = append(primary,
+				footerShortcut{"S", "Single"},
+				footerShortcut{"A/B", "Pick A/B"},
+				footerShortcut{"E", foldDesc},
+			)
+			if ctx.FilterActive {
+				primary = append(primary, scopeShortcut)
+			}
+			primary = append(primary,
+				footerShortcut{"1-3", "Format"},
+				footerShortcut{"4/v", liveDesc},
+				footerShortcut{"w", ribbonToggleDesc},
+				footerShortcut{"r", "Restore"},
+				footerShortcut{"T/Ctrl+t", "Theme"},
+				footerShortcut{"Esc", "Timeline"},
+				footerShortcut{"z", zoomDesc},
+				footerShortcut{"p", "Cherry"},
+				footerShortcut{"e", "Export"},
+				footerShortcut{"g", "Git"},
+			)
+			return primary, trailing
+		}
+
 		primary = append(primary, footerShortcut{"Esc", "Timeline"})
+		if ctx.FilterActive {
+			primary = append(primary, scopeShortcut)
+		}
 		primary = append(primary, footerShortcut{"z", zoomDesc})
 		switch ctx.ActiveTab {
 		case 0: // TabDiff
@@ -210,6 +287,7 @@ func buildFooterShortcuts(ctx FooterContext) (primary []footerShortcut, trailing
 			primary = append(primary,
 				footerShortcut{"1-3", "Format"},
 				footerShortcut{"4/v", liveDesc},
+				footerShortcut{"S", "Split"},
 			)
 		case 1: // TabConfig
 			primary = append(primary, footerShortcut{"1-2", "Format"})
@@ -224,13 +302,15 @@ func buildFooterShortcuts(ctx FooterContext) (primary []footerShortcut, trailing
 			footerShortcut{"p", "Cherry"},
 			footerShortcut{"e", "Export"},
 			footerShortcut{"g", "Git"},
+			footerShortcut{"w", ribbonToggleDesc},
+			footerShortcut{"[/]", "Window"},
 			footerShortcut{"T/Ctrl+t", "Theme"},
 		)
 		return primary, trailing
 
 	default: // 0: PaneTimeline
 		if ctx.FilterActive {
-			primary = append(primary, footerShortcut{"Esc", "Clear"})
+			primary = append(primary, footerShortcut{"Esc", "Clear"}, scopeShortcut)
 		}
 		primary = append(primary,
 			footerShortcut{"Enter", "Inspect"},
@@ -239,6 +319,9 @@ func buildFooterShortcuts(ctx FooterContext) (primary []footerShortcut, trailing
 			footerShortcut{"m", compareDesc},
 			footerShortcut{"z", zoomDesc},
 			footerShortcut{"r", "Restore"},
+			footerShortcut{"S", "Split"},
+			footerShortcut{"w", ribbonToggleDesc},
+			footerShortcut{"[/]", "Window"},
 			footerShortcut{"p", "Cherry"},
 			footerShortcut{"e", "Export"},
 			footerShortcut{"g", "Git"},

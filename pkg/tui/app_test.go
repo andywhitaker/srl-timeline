@@ -183,7 +183,7 @@ func TestConfigAndBlameScroll(t *testing.T) {
 	app := resModel.(AppModel)
 
 	// Switch to Config tab
-	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
 	app = resModel.(AppModel)
 	if app.ActiveTab != TabConfig {
 		t.Fatalf("expected TabConfig")
@@ -196,11 +196,11 @@ func TestConfigAndBlameScroll(t *testing.T) {
 	initOffset := app.ConfigView.Viewport.YOffset
 	t.Logf("Initial YOffset: %d", initOffset)
 
-	// Scroll down with mouse wheel in detail pane (X=60, Y=10)
+	// Scroll down with mouse wheel in detail pane (X=70, Y=12)
 	for i := 0; i < 15; i++ {
 		resModel, _ = app.Update(tea.MouseMsg{
 			X:    70,
-			Y:    10,
+			Y:    12,
 			Type: tea.MouseWheelDown,
 		})
 		app = resModel.(AppModel)
@@ -213,7 +213,7 @@ func TestConfigAndBlameScroll(t *testing.T) {
 	}
 
 	// Test Blame tab (enable wrap so long TLS cert lines exceed viewport height and scroll)
-	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
 	app = resModel.(AppModel)
 	if app.ActiveTab != TabBlame {
 		t.Fatalf("expected TabBlame")
@@ -225,7 +225,7 @@ func TestConfigAndBlameScroll(t *testing.T) {
 	for i := 0; i < 15; i++ {
 		resModel, _ = app.Update(tea.MouseMsg{
 			X:    70,
-			Y:    10,
+			Y:    12,
 			Type: tea.MouseWheelDown,
 		})
 		app = resModel.(AppModel)
@@ -465,45 +465,47 @@ func TestMouseClickHitBoxes(t *testing.T) {
 		return HitChip{}
 	}
 
-	// 2. Click Embedded Border Tab: Config (Y=2)
+	mainStartY := 2 + app.TimelineRibbon.OuterHeight()
+
+	// 2. Click Embedded Border Tab: Config (Y=mainStartY)
 	cfgTab := findChip(tabRanges, "config")
-	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + cfgTab.StartX + 1, Y: 2, Type: tea.MouseLeft})
+	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + cfgTab.StartX + 1, Y: mainStartY, Type: tea.MouseLeft})
 	app = resModel.(AppModel)
 	if app.ActiveTab != TabConfig {
-		t.Fatalf("expected ActiveTab to be TabConfig after clicking tab at Y=2, got %v", app.ActiveTab)
+		t.Fatalf("expected ActiveTab to be TabConfig after clicking tab at Y=%d, got %v", mainStartY, app.ActiveTab)
 	}
 
-	// 3. Click Embedded Border Tab: Blame (Y=2)
+	// 3. Click Embedded Border Tab: Blame (Y=mainStartY)
 	blameTab := findChip(tabRanges, "blame")
-	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + blameTab.StartX + 1, Y: 2, Type: tea.MouseLeft})
+	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + blameTab.StartX + 1, Y: mainStartY, Type: tea.MouseLeft})
 	app = resModel.(AppModel)
 	if app.ActiveTab != TabBlame {
-		t.Fatalf("expected ActiveTab to be TabBlame after clicking tab at Y=2, got %v", app.ActiveTab)
+		t.Fatalf("expected ActiveTab to be TabBlame after clicking tab at Y=%d, got %v", mainStartY, app.ActiveTab)
 	}
 
-	// 4. Click Embedded Border Tab: Diff (Y=2)
+	// 4. Click Embedded Border Tab: Diff (Y=mainStartY)
 	diffTab := findChip(tabRanges, "diff")
-	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + diffTab.StartX + 1, Y: 2, Type: tea.MouseLeft})
+	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + diffTab.StartX + 1, Y: mainStartY, Type: tea.MouseLeft})
 	app = resModel.(AppModel)
 	if app.ActiveTab != TabDiff {
-		t.Fatalf("expected ActiveTab to be TabDiff after clicking tab at Y=2, got %v", app.ActiveTab)
+		t.Fatalf("expected ActiveTab to be TabDiff after clicking tab at Y=%d, got %v", mainStartY, app.ActiveTab)
 	}
 
-	// 5. Click Sub-Option in Diff Toolbar: Path (Y=3)
+	// 5. Click Sub-Option in Diff Toolbar: Path (Y=mainStartY+1)
 	diffControls := app.DiffView.ControlHitRanges()
 	pathChip := findChip(diffControls, "path")
-	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + 1 + pathChip.StartX + 1, Y: 3, Type: tea.MouseLeft})
+	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + 1 + pathChip.StartX + 1, Y: mainStartY + 1, Type: tea.MouseLeft})
 	app = resModel.(AppModel)
 	if app.DiffView.DiffMode != "path" {
-		t.Fatalf("expected DiffMode to be path after clicking sub-option at Y=3, got %v", app.DiffView.DiffMode)
+		t.Fatalf("expected DiffMode to be path after clicking sub-option at Y=%d, got %v", mainStartY+1, app.DiffView.DiffMode)
 	}
 
-	// 6. Click Sub-Option in Diff Toolbar: vs Live (Y=3)
+	// 6. Click Sub-Option in Diff Toolbar: vs Live (Y=mainStartY+1)
 	liveChip := findChip(diffControls, "live")
-	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + 1 + liveChip.StartX + 1, Y: 3, Type: tea.MouseLeft})
+	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + 1 + liveChip.StartX + 1, Y: mainStartY + 1, Type: tea.MouseLeft})
 	app = resModel.(AppModel)
 	if !app.VsLive {
-		t.Fatalf("expected VsLive to be true after clicking vs Live at Y=3")
+		t.Fatalf("expected VsLive to be true after clicking vs Live at Y=%d", mainStartY+1)
 	}
 }
 
@@ -933,24 +935,25 @@ func TestTUIBugFixes(t *testing.T) {
 	app.setNotification("Test inline footer toast", lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorOnAccent))
 	timelineW, detailW := computeSplitOuterWidths(120)
 	detailStartX := timelineW + 1
+	mainStartY := 2 + app.TimelineRibbon.OuterHeight()
 	diffTab := DetailTabHitRanges(detailW, false)[0]
-	// Click embedded Top Tab Diff at Y = 2 (no vertical shift even with toast!)
-	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + diffTab.StartX + 1, Y: 2, Type: tea.MouseLeft})
+	// Click embedded Top Tab Diff at Y = mainStartY (no vertical shift even with toast!)
+	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + diffTab.StartX + 1, Y: mainStartY, Type: tea.MouseLeft})
 	app = resModel.(AppModel)
 	if app.ActiveTab != TabDiff {
-		t.Fatalf("expected click at Y=2 (with inline toast) to select TabDiff, got %v", app.ActiveTab)
+		t.Fatalf("expected click at Y=%d (with inline toast) to select TabDiff, got %v", mainStartY, app.ActiveTab)
 	}
-	// Click [1] Unified then [3] CLI sub-option in TabDiff toolbar at Y = 3
+	// Click [1] Unified then [3] CLI sub-option in TabDiff toolbar at Y = mainStartY + 1
 	controls := app.DiffView.ControlHitRanges()
-	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + 1 + controls[0].StartX + 1, Y: 3, Type: tea.MouseLeft})
+	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + 1 + controls[0].StartX + 1, Y: mainStartY + 1, Type: tea.MouseLeft})
 	app = resModel.(AppModel)
 	if app.DiffView.DiffMode != "unified" {
-		t.Fatalf("expected click on Unified pill at Y=3 to select DiffMode=unified, got %q", app.DiffView.DiffMode)
+		t.Fatalf("expected click on Unified pill at Y=%d to select DiffMode=unified, got %q", mainStartY+1, app.DiffView.DiffMode)
 	}
-	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + 1 + controls[2].StartX + 1, Y: 3, Type: tea.MouseLeft})
+	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + 1 + controls[2].StartX + 1, Y: mainStartY + 1, Type: tea.MouseLeft})
 	app = resModel.(AppModel)
 	if app.DiffView.DiffMode != "cli" {
-		t.Fatalf("expected click on CLI pill at Y=3 (with inline toast) to select DiffMode=cli, got %q", app.DiffView.DiffMode)
+		t.Fatalf("expected click on CLI pill at Y=%d (with inline toast) to select DiffMode=cli, got %q", mainStartY+1, app.DiffView.DiffMode)
 	}
 
 	// 5. Test CherryPickModal mouse wheel scrolling via AppModel.Update
@@ -1080,17 +1083,18 @@ func TestReviewerModalInputsAndFilterRecovery(t *testing.T) {
 		t.Fatalf("BlameView failed to restore content after empty entries, got:\n%s", blamePlain)
 	}
 
-	// 4. Test TabConfig sub-option mouse click on [2] JSON in toolbar (Y = 3)
+	// 4. Test TabConfig sub-option mouse click on [2] JSON in toolbar (Y = mainStartY + 1)
 	app.Notification = ""
 	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 	app = resModel.(AppModel)
 	timelineW, _ := computeSplitOuterWidths(120)
 	detailStartX := timelineW + 1
+	mainStartY := 2 + app.TimelineRibbon.OuterHeight()
 	cfgControls := app.ConfigView.ControlHitRanges()
-	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + 1 + cfgControls[1].StartX + 1, Y: 3, Type: tea.MouseLeft})
+	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + 1 + cfgControls[1].StartX + 1, Y: mainStartY + 1, Type: tea.MouseLeft})
 	app = resModel.(AppModel)
 	if app.ConfigView.FormatMode != "json" {
-		t.Fatalf("expected click on [2] JSON pill at Y=3 in TabConfig to select FormatMode=json, got %q", app.ConfigView.FormatMode)
+		t.Fatalf("expected click on [2] JSON pill at Y=%d in TabConfig to select FormatMode=json, got %q", mainStartY+1, app.ConfigView.FormatMode)
 	}
 
 	// 5. Test in-flight restore/cherry-pick guard (isRestoring)
@@ -1805,17 +1809,17 @@ func TestMouseHitRegionsAndStrictWheelRouting(t *testing.T) {
 	}
 
 	// 7. Timeline row click selects commit using LinesPerCommit() (2 rows/commit)
-	// Commit 0 is at Y=3..4, Commit 1 is at Y=5..6
-	resModel, _ = app.Update(tea.MouseMsg{X: 10, Y: 3, Type: tea.MouseLeft})
+	mainStartY := 2 + app.TimelineRibbon.OuterHeight()
+	resModel, _ = app.Update(tea.MouseMsg{X: 10, Y: mainStartY + 1, Type: tea.MouseLeft})
 	app = resModel.(AppModel)
 	if app.TimelineView.SelectedIndex != 0 {
-		t.Fatalf("expected click on Timeline row Y=3 to select commit 0, got %d", app.TimelineView.SelectedIndex)
+		t.Fatalf("expected click on Timeline row Y=%d to select commit 0, got %d", mainStartY+1, app.TimelineView.SelectedIndex)
 	}
 
 	// 8. Blame Attribution row click selects entry via EntryAtRow
 	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
 	app = resModel.(AppModel)
-	vpStartY := 3 + app.BlameView.HeaderRows()
+	vpStartY := mainStartY + 1 + app.BlameView.HeaderRows()
 	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + 10, Y: vpStartY + 2, Type: tea.MouseLeft})
 	app = resModel.(AppModel)
 	if app.BlameView.SelectedLine != 2 {
@@ -1873,12 +1877,12 @@ func TestKeyboardFlowZoomCompareThemeModalAndBlameJump(t *testing.T) {
 	if !app.Zoomed || !app.DiffView.Zoomed || !app.ConfigView.Zoomed || !app.BlameView.Zoomed {
 		t.Fatalf("expected Zoomed=true synced across AppModel and all 3 Detail views")
 	}
-	if app.DiffView.Width != 118 { // 120 - 2 borders
-		t.Fatalf("expected zoomed DiffView inner width 118, got %d", app.DiffView.Width)
+	if app.DiffView.Width != 114 { // 120 - 3 collapsed ▶ rail - 1 gap - 2 borders
+		t.Fatalf("expected zoomed DiffView inner width 114, got %d", app.DiffView.Width)
 	}
 	zoomedView := stripANSI(app.View())
-	if strings.Contains(zoomedView, "TIMELINE") || !strings.Contains(zoomedView, "[ZOOM]") {
-		t.Fatalf("expected zoomed view to hide TIMELINE and show [ZOOM] badge")
+	if strings.Contains(zoomedView, "TIMELINE 1/3") || !strings.Contains(zoomedView, "[ZOOM]") || !strings.Contains(zoomedView, "▶") {
+		t.Fatalf("expected zoomed view to hide left commit list TIMELINE 1/3 and show [ZOOM] badge + ▶ rail")
 	}
 	// First Esc unzooms (staying in PaneDetail)
 	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyEsc})
@@ -1893,16 +1897,21 @@ func TestKeyboardFlowZoomCompareThemeModalAndBlameJump(t *testing.T) {
 		t.Fatalf("expected second Esc to return focus to PaneTimeline, got %v", app.FocusedPane)
 	}
 
-	// Shift+Tab cycles focus between Timeline and Detail
+	// Shift+Tab cycles focus backwards across visible panes: Timeline -> Ribbon -> Detail -> Timeline
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	app = resModel.(AppModel)
+	if app.FocusedPane != PaneRibbon {
+		t.Fatalf("expected Shift+Tab from Timeline to cycle to PaneRibbon, got %v", app.FocusedPane)
+	}
 	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	app = resModel.(AppModel)
 	if app.FocusedPane != PaneDetail {
-		t.Fatalf("expected Shift+Tab to cycle to PaneDetail")
+		t.Fatalf("expected second Shift+Tab to cycle to PaneDetail, got %v", app.FocusedPane)
 	}
 	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	app = resModel.(AppModel)
 	if app.FocusedPane != PaneTimeline {
-		t.Fatalf("expected second Shift+Tab to cycle back to PaneTimeline")
+		t.Fatalf("expected third Shift+Tab to cycle back to PaneTimeline, got %v", app.FocusedPane)
 	}
 
 	// 3. PaneFilter: Tab and Down exit keeping query; Ctrl+c clears non-empty filter, quits when empty
@@ -2307,7 +2316,8 @@ func TestDiffTargetUXParentLookupToggleAndFooter(t *testing.T) {
 			break
 		}
 	}
-	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + 1 + liveChip.StartX + 2, Y: 3, Type: tea.MouseLeft})
+	mainStartY := 2 + app.TimelineRibbon.OuterHeight()
+	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + 1 + liveChip.StartX + 2, Y: mainStartY + 1, Type: tea.MouseLeft})
 	app = resModel.(AppModel)
 	if app.VsLive {
 		t.Fatalf("expected mouse click on [4] toggle chip to disable VsLive")
@@ -2319,4 +2329,1368 @@ func TestDiffTargetUXParentLookupToggleAndFooter(t *testing.T) {
 	if app.NotifyStyle.GetBackground() != ColorPrimary {
 		t.Fatalf("expected VsLive OFF toast background ColorPrimary, got %v", app.NotifyStyle.GetBackground())
 	}
+}
+
+func TestVisualTimelineRibbonIntegrationZoomPanAndFilterSync(t *testing.T) {
+	_ = SetColorProfile("truecolor")
+	_, _ = SetTheme("dark")
+
+	backend := gitbackend.NewGitBackend(filepath.Join(t.TempDir(), "repo"))
+	baseTime := time.Now().UTC().Truncate(time.Second)
+
+	cfgs := []struct {
+		ts   time.Time
+		msg  string
+		data map[string]interface{}
+	}{
+		{
+			ts:  baseTime.Add(-10 * 24 * time.Hour),
+			msg: "Initial baseline",
+			data: map[string]interface{}{
+				"system": map[string]interface{}{"name": map[string]interface{}{"host-name": "srl-rib-1"}},
+				"network-instance": []interface{}{
+					map[string]interface{}{
+						"name": "default",
+						"protocols": map[string]interface{}{
+							"bgp": map[string]interface{}{
+								"afi-safi": []interface{}{
+									map[string]interface{}{"afi-safi-name": "ipv4-unicast", "admin-state": "enable"},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			ts:  baseTime.Add(-3 * 24 * time.Hour),
+			msg: "Add ethernet-1/1",
+			data: map[string]interface{}{
+				"system": map[string]interface{}{"name": map[string]interface{}{"host-name": "srl-rib-2"}},
+				"interface": []interface{}{
+					map[string]interface{}{"name": "ethernet-1/1", "description": "Uplink-1"},
+				},
+			},
+		},
+		{
+			ts:  baseTime.Add(-6 * time.Hour),
+			msg: "Add ipv6-unicast peer",
+			data: map[string]interface{}{
+				"system": map[string]interface{}{"name": map[string]interface{}{"host-name": "srl-rib-3"}},
+				"interface": []interface{}{
+					map[string]interface{}{"name": "ethernet-1/1", "description": "Uplink-1"},
+				},
+				"network-instance": []interface{}{
+					map[string]interface{}{
+						"name": "default",
+						"protocols": map[string]interface{}{
+							"bgp": map[string]interface{}{
+								"afi-safi": []interface{}{
+									map[string]interface{}{"afi-safi-name": "ipv4-unicast", "admin-state": "enable"},
+									map[string]interface{}{"afi-safi-name": "ipv6-unicast", "admin-state": "enable"},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			ts:  baseTime.Add(-15 * time.Minute),
+			msg: "Update ethernet-1/1 description",
+			data: map[string]interface{}{
+				"system": map[string]interface{}{"name": map[string]interface{}{"host-name": "srl-rib-4"}},
+				"interface": []interface{}{
+					map[string]interface{}{"name": "ethernet-1/1", "description": "Core-Link-1"},
+				},
+			},
+		},
+	}
+
+	var shas []string
+	for i, c := range cfgs {
+		_, sha, err := backend.RecordConfigChange(c.data, "admin", fmt.Sprintf("%d", i+1), "", c.ts, c.msg, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		shas = append(shas, sha)
+	}
+
+	model := NewAppModel(backend, nil, "")
+	resModel, _ := model.Update(tea.WindowSizeMsg{Width: 136, Height: 36})
+	app := resModel.(AppModel)
+
+	if app.TimelineRibbon.OuterHeight() != 6 || len(app.TimelineView.Commits) != 4 {
+		t.Fatalf("expected 6-row ribbon & 4 commits, got h=%d n=%d", app.TimelineRibbon.OuterHeight(), len(app.TimelineView.Commits))
+	}
+	assertNoUnrecoveredReset(t, "ribbon-int-136x36", app.View(), 136, 36)
+
+	// 1. Click preset [1h] on ribbon row 0 (Y=2) -> narrows window to only the -15m commit
+	var chip1h, chipAll HitChip
+	for _, ch := range app.TimelineRibbon.TopChipHitRanges() {
+		if ch.Label == "preset:1h" {
+			chip1h = ch
+		}
+		if ch.Label == "preset:all" {
+			chipAll = ch
+		}
+	}
+	resModel, _ = app.Update(tea.MouseMsg{X: chip1h.StartX + 1, Y: 2, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.TimelineRibbon.ActivePreset != "1h" || len(app.TimelineView.Commits) != 1 || !app.TimelineView.WindowNarrowed {
+		t.Fatalf("expected preset 1h to narrow to 1 commit, got preset=%q n=%d narrowed=%v",
+			app.TimelineRibbon.ActivePreset, len(app.TimelineView.Commits), app.TimelineView.WindowNarrowed)
+	}
+	if !strings.Contains(stripANSI(app.View()), "IN WINDOW 1/1") {
+		t.Fatalf("expected IN WINDOW 1/1 title when ribbon window is narrowed")
+	}
+
+	// Click [All] -> restores all 4 commits
+	resModel, _ = app.Update(tea.MouseMsg{X: chipAll.StartX + 1, Y: 2, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.TimelineRibbon.ActivePreset != "all" || len(app.TimelineView.Commits) != 4 {
+		t.Fatalf("expected preset All to restore 4 commits, got preset=%q n=%d", app.TimelineRibbon.ActivePreset, len(app.TimelineView.Commits))
+	}
+
+	// 2. Keyboard window edge nudges [, ], pan <, zoom +, reset 0, fit f
+	origStart := app.TimelineRibbon.WindowStart
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'['}})
+	app = resModel.(AppModel)
+	if !app.TimelineRibbon.WindowStart.After(origStart) {
+		t.Fatalf("expected '[' to nudge WindowStart right")
+	}
+	origEnd := app.TimelineRibbon.WindowEnd
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
+	app = resModel.(AppModel)
+	if !app.TimelineRibbon.WindowEnd.Before(origEnd) {
+		t.Fatalf("expected ']' to nudge WindowEnd left")
+	}
+	spanBeforeZoom := app.TimelineRibbon.WindowEnd.Sub(app.TimelineRibbon.WindowStart)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'+'}})
+	app = resModel.(AppModel)
+	if app.TimelineRibbon.WindowEnd.Sub(app.TimelineRibbon.WindowStart) >= spanBeforeZoom {
+		t.Fatalf("expected '+' to zoom in")
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'<'}})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'0'}})
+	app = resModel.(AppModel)
+	if app.TimelineRibbon.ActivePreset != "all" || len(app.TimelineView.Commits) != 4 {
+		t.Fatalf("expected '0' to reset window to All")
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	app = resModel.(AppModel)
+	if app.TimelineRibbon.ActivePreset != "fit" {
+		t.Fatalf("expected 'f' to FitToMatches, got preset=%q", app.TimelineRibbon.ActivePreset)
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'0'}})
+	app = resModel.(AppModel)
+
+	// 3. Toggle ribbon collapse via 'w'
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	app = resModel.(AppModel)
+	if !app.TimelineRibbon.Collapsed || app.TimelineRibbon.OuterHeight() != 1 {
+		t.Fatalf("expected 'w' to collapse ribbon to 1 row")
+	}
+	assertNoUnrecoveredReset(t, "ribbon-collapsed-136x36", app.View(), 136, 36)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	app = resModel.(AppModel)
+	if app.TimelineRibbon.Collapsed || app.TimelineRibbon.OuterHeight() != 6 {
+		t.Fatalf("expected second 'w' to expand ribbon back to 6 rows")
+	}
+
+	// 4. Focus PaneRibbon and step commits with ← / → and enter workspace with Enter
+	app.TimelineView.SelectIndex(0)
+	app.syncCompareMarkers()
+	app.setFocusedPane(PaneRibbon)
+	if app.TimelineView.SelectedIndex != 0 {
+		t.Fatalf("expected newest commit 0 selected initially")
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	app = resModel.(AppModel)
+	if app.TimelineView.SelectedIndex != 1 {
+		t.Fatalf("expected ← in PaneRibbon to move to older commit 1, got %d", app.TimelineView.SelectedIndex)
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRight})
+	app = resModel.(AppModel)
+	if app.TimelineView.SelectedIndex != 0 {
+		t.Fatalf("expected → in PaneRibbon to move back to newer commit 0, got %d", app.TimelineView.SelectedIndex)
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = resModel.(AppModel)
+	if app.FocusedPane != PaneTimeline {
+		t.Fatalf("expected Enter in PaneRibbon to enter PaneTimeline, got %v", app.FocusedPane)
+	}
+
+	// 5. Mouse wheel zoom + scrubber drag (MouseLeft -> MouseMotion -> MouseRelease)
+	spanAll := app.TimelineRibbon.WindowEnd.Sub(app.TimelineRibbon.WindowStart)
+	resModel, _ = app.Update(tea.MouseMsg{X: 60, Y: 3, Type: tea.MouseWheelUp})
+	app = resModel.(AppModel)
+	if app.TimelineRibbon.WindowEnd.Sub(app.TimelineRibbon.WindowStart) >= spanAll {
+		t.Fatalf("expected MouseWheelUp over ribbon to zoom in")
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'0'}})
+	app = resModel.(AppModel)
+
+	layout := app.TimelineRibbon.computeLayout()
+	origDragStart := app.TimelineRibbon.WindowStart
+	resModel, _ = app.Update(tea.MouseMsg{X: layout.leftHandleX, Y: 2 + 4, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.TimelineRibbon.DragMode != "left" {
+		t.Fatalf("expected left handle drag start, got %q", app.TimelineRibbon.DragMode)
+	}
+	resModel, _ = app.Update(tea.MouseMsg{X: layout.leftHandleX + 20, Y: 2 + 4, Type: tea.MouseMotion})
+	app = resModel.(AppModel)
+	if !app.TimelineRibbon.WindowStart.After(origDragStart) {
+		t.Fatalf("expected MouseMotion on left handle to advance WindowStart")
+	}
+	resModel, _ = app.Update(tea.MouseMsg{X: layout.leftHandleX + 20, Y: 2 + 4, Type: tea.MouseRelease})
+	app = resModel.(AppModel)
+	if app.TimelineRibbon.DragMode != "" {
+		t.Fatalf("expected MouseRelease to clear DragMode")
+	}
+
+	// 6. Shift+Click on oldest commit node pins Left A and enters Split Diff
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'0'}})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.MouseMsg{X: 1, Y: 4, Type: tea.MouseLeft, Shift: true})
+	app = resModel.(AppModel)
+	if app.LeftCommitSHA != shas[0] || !app.SplitDiff {
+		t.Fatalf("expected Shift+Click on oldest node to pin Left A=%s and enable SplitDiff, got left=%q split=%v",
+			shas[0], app.LeftCommitSHA, app.SplitDiff)
+	}
+}
+
+func TestSideBySideSplitDiffPickerAndChronologicalNormalization(t *testing.T) {
+	_ = SetColorProfile("truecolor")
+	_, _ = SetTheme("dark")
+
+	backend := gitbackend.NewGitBackend(filepath.Join(t.TempDir(), "repo"))
+	t0 := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Second)
+
+	cfg1 := map[string]interface{}{
+		"system": map[string]interface{}{"name": map[string]interface{}{"host-name": "srl-split-1"}},
+		"interface": []interface{}{
+			map[string]interface{}{"name": "ethernet-1/1", "description": "Old-Link"},
+			map[string]interface{}{"name": "ethernet-1/2", "description": "Shared-2"},
+			map[string]interface{}{"name": "ethernet-1/3", "description": "Shared-3"},
+			map[string]interface{}{"name": "ethernet-1/4", "description": "Shared-4"},
+			map[string]interface{}{"name": "ethernet-1/5", "description": "Shared-5"},
+			map[string]interface{}{"name": "ethernet-1/6", "description": "Shared-6"},
+			map[string]interface{}{"name": "ethernet-1/7", "description": "Shared-7"},
+		},
+	}
+	cfg2 := map[string]interface{}{
+		"system": map[string]interface{}{"name": map[string]interface{}{"host-name": "srl-split-2"}},
+		"interface": []interface{}{
+			map[string]interface{}{"name": "ethernet-1/1", "description": "Mid-Link"},
+			map[string]interface{}{"name": "ethernet-1/2", "description": "Shared-2"},
+			map[string]interface{}{"name": "ethernet-1/3", "description": "Shared-3"},
+			map[string]interface{}{"name": "ethernet-1/4", "description": "Shared-4"},
+			map[string]interface{}{"name": "ethernet-1/5", "description": "Shared-5"},
+			map[string]interface{}{"name": "ethernet-1/6", "description": "Shared-6"},
+			map[string]interface{}{"name": "ethernet-1/7", "description": "Shared-7"},
+		},
+	}
+	cfg3 := map[string]interface{}{
+		"system": map[string]interface{}{"name": map[string]interface{}{"host-name": "srl-split-3"}},
+		"interface": []interface{}{
+			map[string]interface{}{"name": "ethernet-1/1", "description": "New-Link"},
+			map[string]interface{}{"name": "ethernet-1/2", "description": "Shared-2"},
+			map[string]interface{}{"name": "ethernet-1/3", "description": "Shared-3"},
+			map[string]interface{}{"name": "ethernet-1/4", "description": "Shared-4"},
+			map[string]interface{}{"name": "ethernet-1/5", "description": "Shared-5"},
+			map[string]interface{}{"name": "ethernet-1/6", "description": "Shared-6"},
+			map[string]interface{}{"name": "ethernet-1/7", "description": "Shared-7"},
+		},
+	}
+
+	_, sha1, err := backend.RecordConfigChange(cfg1, "alice", "1", "", t0, "Commit 1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, sha2, err := backend.RecordConfigChange(cfg2, "bob", "2", "", t0.Add(time.Hour), "Commit 2", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, sha3, err := backend.RecordConfigChange(cfg3, "admin", "3", "", t0.Add(2*time.Hour), "Commit 3", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = sha2
+
+	model := NewAppModel(backend, nil, "")
+
+	// 1. Width < 100 guard at 80x24: 'S' must stay single-pane and emit warning toast + ribbon auto-collapsed
+	resModel, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	app := resModel.(AppModel)
+	if !app.TimelineRibbon.Collapsed {
+		t.Fatalf("expected ribbon auto-collapsed at Height=24")
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	app = resModel.(AppModel)
+	if app.SplitDiff || app.DiffView.IsSplitActive() {
+		t.Fatalf("expected SplitDiff to stay false at 80 cols")
+	}
+	if !strings.Contains(app.Notification, "≥100 cols") {
+		t.Fatalf("expected ≥100 cols warning toast, got %q", app.Notification)
+	}
+	assertNoUnrecoveredReset(t, "split-guard-80x24", app.View(), 80, 24)
+
+	// 2. Resize to 136x36 and press 'S' -> Side-by-Side Split Diff activates while KEEPING left commit list open!
+	resModel, _ = app.Update(tea.WindowSizeMsg{Width: 136, Height: 36})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	app = resModel.(AppModel)
+	if !app.SplitDiff || !app.DiffView.IsSplitActive() || app.hideTimelineList() {
+		t.Fatalf("expected active SplitDiff at 136x36 with left panel still open, got split=%v active=%v hideTL=%v",
+			app.SplitDiff, app.DiffView.IsSplitActive(), app.hideTimelineList())
+	}
+	splitView := app.View()
+	assertNoUnrecoveredReset(t, "split-active-136x36", splitView, 136, 36)
+	plainSplit := stripANSI(splitView)
+	if !strings.Contains(plainSplit, "[SPLIT A↔B]") || !strings.Contains(plainSplit, "A (OLDER)") || !strings.Contains(plainSplit, "B (NEWER)") || !strings.Contains(plainSplit, "[◀]") {
+		t.Fatalf("expected split header badges and left-panel [◀] button in 136x36 split view:\n%s", plainSplit)
+	}
+
+	// 3. 'E' toggles FoldUnchanged (Folded ↔ Full Config) and 1/2/3 switch split diff modes cleanly
+	if !app.FoldUnchanged {
+		t.Fatalf("expected FoldUnchanged=true by default")
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
+	app = resModel.(AppModel)
+	if app.FoldUnchanged || app.DiffView.FoldUnchanged {
+		t.Fatalf("expected 'E' to disable FoldUnchanged")
+	}
+	for _, tc := range []struct {
+		key  rune
+		mode string
+	}{
+		{'1', "unified"},
+		{'2', "path"},
+		{'3', "cli"},
+	} {
+		resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{tc.key}})
+		app = resModel.(AppModel)
+		if app.DiffView.DiffMode != tc.mode || app.DiffView.SideBySideResult.Mode != tc.mode {
+			t.Fatalf("key %q in split mode: expected DiffMode/SideBySideResult.Mode=%q, got %q/%q",
+				tc.key, tc.mode, app.DiffView.DiffMode, app.DiffView.SideBySideResult.Mode)
+		}
+		assertNoUnrecoveredReset(t, "split-mode-"+tc.mode, app.View(), 136, 36)
+	}
+
+	// 4. Open unified 2-config CommitPickerModal via 'A':
+	//    Clear selections ('c'), Space-select NEWEST (sha3) first then OLDER (sha1), verify
+	//    strict max-2 enforcement on a 3rd Space, and confirm with Enter -> older sha1 is
+	//    auto-assigned Left (A) and newer sha3 is Right (B)!
+	app.LeftCommitSHA = sha1
+	app.RightCommitSHA = sha2
+	app.normalizeSplitEndpoints()
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
+	app = resModel.(AppModel)
+	if app.ActiveModal != ModalCommitPicker {
+		t.Fatalf("expected ModalCommitPicker after 'A', got modal=%v", app.ActiveModal)
+	}
+	assertNoUnrecoveredReset(t, "commit-picker-136x36", app.View(), 136, 36)
+	// Press 'c' to clear all pre-selections, then check index 1 (sha3 newest) and index 3 (sha1 oldest) via Space.
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	app = resModel.(AppModel)
+	if app.CommitPickerModal.SelectionCount() != 0 {
+		t.Fatalf("expected 'c' to clear picker selections, got %d", app.CommitPickerModal.SelectionCount())
+	}
+	app.CommitPickerModal.SelectedIndex = 1 // sha3 (newest)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	app = resModel.(AppModel)
+	// Enter with only 1 selected must keep modal open.
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = resModel.(AppModel)
+	if app.ActiveModal != ModalCommitPicker {
+		t.Fatalf("expected ModalCommitPicker to stay open on Enter when only 1/2 selected")
+	}
+	app.CommitPickerModal.SelectedIndex = 3 // sha1 (oldest)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	app = resModel.(AppModel)
+	// Trying to Space-select a 3rd config (index 2 = sha2) must be rejected while 2 are selected.
+	app.CommitPickerModal.SelectedIndex = 2
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	app = resModel.(AppModel)
+	if app.CommitPickerModal.SelectionCount() != 2 || !strings.Contains(app.CommitPickerModal.Notice, "2 already selected") {
+		t.Fatalf("expected strict max-2 rejection on 3rd Space, got count=%d notice=%q",
+			app.CommitPickerModal.SelectionCount(), app.CommitPickerModal.Notice)
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = resModel.(AppModel)
+	if app.ActiveModal != ModalNone {
+		t.Fatalf("expected ModalCommitPicker to close on Enter with 2/2 selected")
+	}
+	if app.LeftCommitSHA != sha1 || app.RightCommitSHA != sha3 {
+		t.Fatalf("expected chronological assignment Left=%s (older) Right=%s (newer), got Left=%s Right=%s",
+			sha1, sha3, app.LeftCommitSHA, app.RightCommitSHA)
+	}
+
+	// 5. Click dual header [B ▾] chip to open CommitPicker (cursor starts on B = sha3),
+	//    Space to uncheck sha3, move to index 0 (● RUNNING CONFIG), Space to check it, Enter -> VsLive=true!
+	mainStartY := 2 + app.TimelineRibbon.OuterHeight()
+	leftW, _, sepW := app.computeWorkspaceOuterWidths()
+	detailStartX := leftW + sepW
+	var pickRight HitChip
+	for _, ch := range app.DiffView.SplitEndpointHitRanges() {
+		if ch.Label == "pick_right" {
+			pickRight = ch
+			break
+		}
+	}
+	if pickRight.Label != "pick_right" {
+		t.Fatalf("expected pick_right hit range on active split header")
+	}
+	resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + 1 + pickRight.StartX + 1, Y: mainStartY + 2, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.ActiveModal != ModalCommitPicker || app.CommitPickerModal.SelectedIndex != 1 {
+		t.Fatalf("expected clicking [B ▾] to open ModalCommitPicker focused on B (idx 1 = sha3), got modal=%v idx=%d",
+			app.ActiveModal, app.CommitPickerModal.SelectedIndex)
+	}
+	// Space unchecks sha3 (B), keeping sha1 checked.
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	app = resModel.(AppModel)
+	app.CommitPickerModal.SelectedIndex = 0 // LiveRunningSentinel
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = resModel.(AppModel)
+	if !app.VsLive || app.LeftCommitSHA != sha1 || app.RightCommitSHA != "" {
+		t.Fatalf("expected ● RUNNING CONFIG selection to set VsLive=true with Left=%s, got vsLive=%v left=%q right=%q",
+			sha1, app.VsLive, app.LeftCommitSHA, app.RightCommitSHA)
+	}
+	if !strings.Contains(stripANSI(app.View()), "RUNNING CONFIG") {
+		t.Fatalf("expected RUNNING CONFIG badge in split header")
+	}
+
+	// 6. Collapsible Left Sidebar rail ([◀] / ▶) works independently of Split Diff,
+	//    and never strands focus on hidden PaneTimeline when collapsed!
+	cStart, cEnd := app.TimelineView.CollapseHitRange()
+	if cStart < 0 || cEnd <= cStart {
+		t.Fatalf("expected valid [◀] collapse hit range, got [%d, %d)", cStart, cEnd)
+	}
+	// Focus Left Panel, then click [◀] -> collapses to 3-col ▶ rail, keeps Split Diff active, redirects focus to PaneDetail!
+	app.setFocusedPane(PaneTimeline)
+	resModel, _ = app.Update(tea.MouseMsg{X: cStart + 1, Y: mainStartY, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if !app.Zoomed || !app.hideTimelineList() || !app.SplitDiff || app.FocusedPane != PaneDetail {
+		t.Fatalf("expected clicking [◀] to collapse left panel into ▶ rail while keeping SplitDiff and redirecting focus, got zoomed=%v split=%v focus=%v",
+			app.Zoomed, app.SplitDiff, app.FocusedPane)
+	}
+	collapsedOut := app.View()
+	assertNoUnrecoveredReset(t, "split-collapsed-rail-136x36", collapsedOut, 136, 36)
+	if !strings.Contains(stripANSI(collapsedOut), "▶") {
+		t.Fatalf("expected collapsed ▶ sidebar rail to be rendered:\n%s", stripANSI(collapsedOut))
+	}
+	// '/' then Esc while collapsed must return focus to PaneDetail (never stranded on hidden PaneTimeline).
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	app = resModel.(AppModel)
+	if app.FocusedPane != PaneDetail {
+		t.Fatalf("expected Esc from FilterBar while collapsed to return focus to PaneDetail, got %v", app.FocusedPane)
+	}
+	// Click anywhere on the collapsed ▶ rail (X=1) -> expands Left Panel while keeping Split Diff active!
+	resModel, _ = app.Update(tea.MouseMsg{X: 1, Y: mainStartY + 3, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.Zoomed || app.hideTimelineList() || !app.SplitDiff {
+		t.Fatalf("expected clicking ▶ rail to reopen Left Panel while preserving SplitDiff, got zoomed=%v split=%v", app.Zoomed, app.SplitDiff)
+	}
+
+	// 7. Plain-clicking ANY commit in Left Commit List OR Visual Timeline Ribbon exits Split Diff back to single commit view!
+	lpc := app.TimelineView.LinesPerCommit()
+	if lpc < 1 {
+		lpc = 2
+	}
+	// Plain click row 1 (sha2) in Left Commit List -> exits SplitDiff and shows sha2 in single-commit view!
+	resModel, _ = app.Update(tea.MouseMsg{X: 8, Y: mainStartY + 1 + 1*lpc, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.SplitDiff || app.VsLive || app.selectedCommitSHA() != sha2 {
+		t.Fatalf("expected plain click in Left Commit List to exit SplitDiff to sha2 (%s), got split=%v vsLive=%v sel=%s",
+			sha2, app.SplitDiff, app.VsLive, app.selectedCommitSHA())
+	}
+	// Re-enter SplitDiff via 'S', then plain-click oldest commit dot on Visual Timeline Ribbon -> exits SplitDiff to sha1!
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	app = resModel.(AppModel)
+	if !app.SplitDiff {
+		t.Fatalf("expected 'S' to re-enter SplitDiff")
+	}
+	resModel, _ = app.Update(tea.MouseMsg{X: 1, Y: 4, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.SplitDiff || app.selectedCommitSHA() != sha1 {
+		t.Fatalf("expected plain click on Visual Timeline Ribbon dot to exit SplitDiff to sha1 (%s), got split=%v sel=%s",
+			sha1, app.SplitDiff, app.selectedCommitSHA())
+	}
+	// Re-enter SplitDiff and verify resize 80x24 -> 136x36 preserves clean rendering & left panel visibility
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	app = resModel.(AppModel)
+	app.setFocusedPane(PaneTimeline)
+	resModel, _ = app.Update(tea.WindowSizeMsg{Width: 136, Height: 36})
+	app = resModel.(AppModel)
+	if app.FocusedPane != PaneTimeline || !app.DiffView.IsSplitActive() || app.hideTimelineList() {
+		t.Fatalf("expected resize back to >=100 cols in Split Diff to keep Left Panel open and focused, got focus=%v splitActive=%v hideTL=%v",
+			app.FocusedPane, app.DiffView.IsSplitActive(), app.hideTimelineList())
+	}
+
+	// 8. Exact WxH & full-bleed SGR across 136x36, 120x35, 80x24, 40x12 (both open & collapsed ▶ rail)
+	for _, collapsed := range []bool{false, true} {
+		app.Zoomed = collapsed
+		for _, sz := range []struct{ w, h int }{
+			{136, 36},
+			{120, 35},
+			{80, 24},
+			{40, 12},
+		} {
+			resModel, _ = app.Update(tea.WindowSizeMsg{Width: sz.w, Height: sz.h})
+			app = resModel.(AppModel)
+			assertNoUnrecoveredReset(t, fmt.Sprintf("split-collapsed=%v-%dx%d", collapsed, sz.w, sz.h), app.View(), sz.w, sz.h)
+		}
+	}
+	app.Zoomed = false
+}
+
+func TestDecoupledDetailFilterScopeAndAutoRescope(t *testing.T) {
+	_ = SetColorProfile("truecolor")
+	_, _ = SetTheme("dark")
+	defer func() { _, _ = SetTheme("dark") }()
+
+	backend := gitbackend.NewGitBackend(filepath.Join(t.TempDir(), "repo"))
+	t0 := time.Now().UTC().Add(-10 * time.Minute)
+
+	cfg1 := map[string]interface{}{
+		"system": map[string]interface{}{
+			"name": map[string]interface{}{"host-name": "leaf-01"},
+		},
+		"interface": []interface{}{
+			map[string]interface{}{"name": "ethernet-1/1", "admin-state": "enable", "description": "uplink-1"},
+		},
+	}
+	cfg2 := map[string]interface{}{
+		"system": map[string]interface{}{
+			"name": map[string]interface{}{"host-name": "leaf-01"},
+		},
+		"interface": []interface{}{
+			map[string]interface{}{"name": "ethernet-1/1", "admin-state": "enable", "description": "uplink-core"},
+		},
+		"network-instance": []interface{}{
+			map[string]interface{}{
+				"name": "default",
+				"protocols": map[string]interface{}{
+					"bgp": map[string]interface{}{
+						"autonomous-system": 65001,
+						"afi-safi": []interface{}{
+							map[string]interface{}{"afi-safi-name": "ipv4-unicast", "admin-state": "enable"},
+							map[string]interface{}{"afi-safi-name": "ipv6-unicast", "admin-state": "disable"},
+						},
+					},
+				},
+			},
+		},
+	}
+	cfg3 := map[string]interface{}{
+		"system": map[string]interface{}{
+			"name": map[string]interface{}{"host-name": "leaf-02"},
+		},
+		"interface": []interface{}{
+			map[string]interface{}{"name": "ethernet-1/1", "admin-state": "enable", "description": "uplink-core"},
+			map[string]interface{}{"name": "ethernet-1/2", "admin-state": "enable", "description": "edge-peer"},
+		},
+		"network-instance": []interface{}{
+			map[string]interface{}{
+				"name": "default",
+				"protocols": map[string]interface{}{
+					"bgp": map[string]interface{}{
+						"autonomous-system": 65002,
+						"afi-safi": []interface{}{
+							map[string]interface{}{"afi-safi-name": "ipv4-unicast", "admin-state": "enable"},
+							map[string]interface{}{"afi-safi-name": "ipv6-unicast", "admin-state": "enable"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	_, sha1, err := backend.RecordConfigChange(cfg1, "alice", "1", "", t0, "Baseline", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, sha2, err := backend.RecordConfigChange(cfg2, "bob", "2", "", t0.Add(2*time.Minute), "Enable BGP", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, sha3, err := backend.RecordConfigChange(cfg3, "admin", "3", "", t0.Add(4*time.Minute), "Update BGP and hostname", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = sha1
+
+	model := NewAppModel(backend, nil, "")
+	resModel, _ := model.Update(tea.WindowSizeMsg{Width: 136, Height: 36})
+	app := resModel.(AppModel)
+
+	// 1. Unfiltered state: zero filter banner, no scope pill, '\' is a no-op
+	if app.DiffView.FilterBannerRow() != -1 {
+		t.Fatalf("expected no DiffView filter banner when unfiltered, got row=%d", app.DiffView.FilterBannerRow())
+	}
+	if app.DiffView.ShownChangeCount != 0 || app.DiffView.TotalUnfilteredChanges != 0 {
+		t.Fatalf("expected 0 diff counts when unfiltered, got shown=%d total=%d",
+			app.DiffView.ShownChangeCount, app.DiffView.TotalUnfilteredChanges)
+	}
+	if sX, eX := app.FilterBar.ScopeHitRange(); sX != -1 || eX != -1 {
+		t.Fatalf("expected ScopeHitRange=(-1,-1) when unfiltered, got [%d,%d)", sX, eX)
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'\\'}})
+	app = resModel.(AppModel)
+	if app.DetailFilterBypass {
+		t.Fatalf("expected '\\' to be a no-op when filter is empty")
+	}
+
+	// 2. Apply '/' filter "bgp": Timeline & Ribbon filter to 2/3 commits; Detail shows scoped subset banner
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	app = resModel.(AppModel)
+	for _, r := range "bgp" {
+		resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		app = resModel.(AppModel)
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = resModel.(AppModel)
+
+	if len(app.TimelineView.Commits) != 2 || len(app.TimelineRibbon.WindowCommits) != 2 {
+		t.Fatalf("expected Timeline and Ribbon filtered to 2 bgp commits, got tl=%d ribbon=%d",
+			len(app.TimelineView.Commits), len(app.TimelineRibbon.WindowCommits))
+	}
+	if app.DetailFilterBypass {
+		t.Fatalf("expected DetailFilterBypass=false initially after applying filter")
+	}
+	if app.DiffView.FilterBannerRow() < 0 {
+		t.Fatalf("expected DiffView filter banner row >= 0 when filter active")
+	}
+	if app.DiffView.ShownChangeCount <= 0 || app.DiffView.TotalUnfilteredChanges <= app.DiffView.ShownChangeCount {
+		t.Fatalf("expected 0 < ShownChangeCount < TotalUnfilteredChanges for scoped bgp diff on sha3, got shown=%d total=%d",
+			app.DiffView.ShownChangeCount, app.DiffView.TotalUnfilteredChanges)
+	}
+	scopedShown := app.DiffView.ShownChangeCount
+	scopedTotal := app.DiffView.TotalUnfilteredChanges
+
+	scopedScreen := stripANSI(app.View())
+	if !strings.Contains(scopedScreen, "Scope: TL+Detail") {
+		t.Fatalf("expected FilterBar 'Scope: TL+Detail' pill when scoped:\n%s", scopedScreen)
+	}
+	if !strings.Contains(scopedScreen, "FILTERED") {
+		t.Fatalf("expected Detail 'FILTERED' banner when scoped:\n%s", scopedScreen)
+	}
+	if !strings.Contains(scopedScreen, "\\ Full Commit") {
+		t.Fatalf("expected Footer '\\ Full Commit' shortcut when scoped:\n%s", scopedScreen)
+	}
+	if strings.Contains(stripANSI(app.DiffView.Viewport.View()), "leaf-02") {
+		t.Fatalf("scoped bgp diff should hide non-bgp change 'leaf-02'")
+	}
+
+	// Verify Config and Blame scoped banners and Blame row click alignment via HeaderRows()
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	app = resModel.(AppModel)
+	if app.ConfigView.FilterBannerRow() < 0 || app.ConfigView.ShownLineCount <= 0 ||
+		app.ConfigView.TotalUnfilteredLines <= app.ConfigView.ShownLineCount {
+		t.Fatalf("expected scoped ConfigView banner with 0 < shown < total, got row=%d shown=%d total=%d",
+			app.ConfigView.FilterBannerRow(), app.ConfigView.ShownLineCount, app.ConfigView.TotalUnfilteredLines)
+	}
+
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	app = resModel.(AppModel)
+	if app.BlameView.FilterBannerRow() < 0 || app.BlameView.ShownEntryCount <= 0 ||
+		app.BlameView.TotalUnfilteredEntries <= app.BlameView.ShownEntryCount {
+		t.Fatalf("expected scoped BlameView banner with 0 < shown < total, got row=%d shown=%d total=%d",
+			app.BlameView.FilterBannerRow(), app.BlameView.ShownEntryCount, app.BlameView.TotalUnfilteredEntries)
+	}
+	// Click second Blame attribution row (row 1) below header rows to confirm HeaderRows() alignment
+	if len(app.BlameView.Entries) >= 2 {
+		tlOuterW, _ := computeSplitOuterWidths(app.Width)
+		detailStartX := tlOuterW + 1
+		mainStartY := app.mainStartY()
+		blameClickY := mainStartY + 1 + app.BlameView.HeaderRows() + 1
+		resModel, _ = app.Update(tea.MouseMsg{X: detailStartX + 10, Y: blameClickY, Type: tea.MouseLeft})
+		app = resModel.(AppModel)
+		if app.BlameView.SelectedLine != 1 {
+			t.Fatalf("expected Blame row click below filter banner to select entry 1, got %d", app.BlameView.SelectedLine)
+		}
+	}
+
+	// Return to Diff tab
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	app = resModel.(AppModel)
+
+	// 3. Toggle via '\' key -> Full Commit while Timeline & Ribbon stay filtered + cyan ▸ match markers
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'\\'}})
+	app = resModel.(AppModel)
+	if !app.DetailFilterBypass || !app.FilterBar.DetailBypass {
+		t.Fatalf("expected DetailFilterBypass=true after '\\'")
+	}
+	if len(app.TimelineView.Commits) != 2 || len(app.TimelineRibbon.WindowCommits) != 2 {
+		t.Fatalf("expected Timeline and Ribbon to remain filtered (2 commits) when DetailFilterBypass=true, got tl=%d ribbon=%d",
+			len(app.TimelineView.Commits), len(app.TimelineRibbon.WindowCommits))
+	}
+	if app.DiffView.ShownChangeCount != scopedTotal || app.DiffView.TotalUnfilteredChanges != scopedTotal {
+		t.Fatalf("expected Full Diff counts %d/%d, got %d/%d",
+			scopedTotal, scopedTotal, app.DiffView.ShownChangeCount, app.DiffView.TotalUnfilteredChanges)
+	}
+	fullScreen := stripANSI(app.View())
+	if !strings.Contains(fullScreen, "Scope: TL only") {
+		t.Fatalf("expected FilterBar 'Scope: TL only' pill when bypassed:\n%s", fullScreen)
+	}
+	if !strings.Contains(fullScreen, "FULL") {
+		t.Fatalf("expected Detail 'FULL' banner when bypassed:\n%s", fullScreen)
+	}
+	if !strings.Contains(fullScreen, "\\ Scope Filter") {
+		t.Fatalf("expected Footer '\\ Scope Filter' shortcut when bypassed:\n%s", fullScreen)
+	}
+	fullDiffPlain := stripANSI(app.DiffView.Viewport.View())
+	if !strings.Contains(fullDiffPlain, "leaf-02") || !strings.Contains(fullDiffPlain, "ethernet-1/2") {
+		t.Fatalf("expected Full Commit diff to reveal non-bgp changes 'leaf-02' and 'ethernet-1/2', got:\n%s", fullDiffPlain)
+	}
+	if !strings.Contains(fullDiffPlain, GlyphCollapsed) {
+		t.Fatalf("expected cyan '%s' matching-line gutter marker in Full Commit diff, got:\n%s", GlyphCollapsed, fullDiffPlain)
+	}
+
+	// 4. Toggle via FilterBar Scope pill click (must NOT focus PaneFilter)
+	scopeStart, scopeEnd := app.FilterBar.ScopeHitRange()
+	if scopeStart < 0 || scopeEnd <= scopeStart {
+		t.Fatalf("expected valid FilterBar ScopeHitRange, got [%d,%d)", scopeStart, scopeEnd)
+	}
+	resModel, _ = app.Update(tea.MouseMsg{X: scopeStart + 1, Y: 1, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.DetailFilterBypass || app.FocusedPane == PaneFilter {
+		t.Fatalf("expected FilterBar Scope pill click to toggle bypass=false without focusing filter, got bypass=%v pane=%v",
+			app.DetailFilterBypass, app.FocusedPane)
+	}
+	if app.DiffView.ShownChangeCount != scopedShown {
+		t.Fatalf("expected re-scoped Diff ShownChangeCount=%d, got %d", scopedShown, app.DiffView.ShownChangeCount)
+	}
+
+	// 5. Toggle via Detail banner pill click
+	tlOuterW, _ := computeSplitOuterWidths(app.Width)
+	detailStartX := tlOuterW + 1
+	mainStartY := app.mainStartY()
+	bannerRow := app.DiffView.FilterBannerRow()
+	bStart, bEnd := app.DiffView.FilterBannerHitRange()
+	if bannerRow < 0 || bStart < 0 || bEnd <= bStart {
+		t.Fatalf("expected valid Detail FilterBannerRow/HitRange, got row=%d [%d,%d)", bannerRow, bStart, bEnd)
+	}
+	resModel, _ = app.Update(tea.MouseMsg{
+		X:    detailStartX + 1 + bStart + 1,
+		Y:    mainStartY + 1 + bannerRow,
+		Type: tea.MouseLeft,
+	})
+	app = resModel.(AppModel)
+	if !app.DetailFilterBypass {
+		t.Fatalf("expected Detail banner pill click to toggle DetailFilterBypass=true")
+	}
+
+	// 6. Preserve DetailFilterBypass across formats (1/2/3), Split (S), Fold (E), Zoom (z), and tabs (c/b/d)
+	for _, key := range []rune{'1', '2', '3'} {
+		resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{key}})
+		app = resModel.(AppModel)
+		if !app.DetailFilterBypass {
+			t.Fatalf("expected format key %q to preserve DetailFilterBypass=true", string(key))
+		}
+	}
+	// Split Diff ('S') preserves DetailFilterBypass and keeps consistent counts + cyan ▸ + clickable split banner
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	app = resModel.(AppModel)
+	if !app.DiffView.IsSplitActive() || !app.DetailFilterBypass {
+		t.Fatalf("expected 'S' to activate Split Diff preserving DetailFilterBypass=true, got split=%v bypass=%v",
+			app.DiffView.IsSplitActive(), app.DetailFilterBypass)
+	}
+	if app.DiffView.ShownChangeCount != scopedTotal || app.DiffView.TotalUnfilteredChanges != scopedTotal {
+		t.Fatalf("expected consistent Split Diff counts %d/%d, got %d/%d",
+			scopedTotal, scopedTotal, app.DiffView.ShownChangeCount, app.DiffView.TotalUnfilteredChanges)
+	}
+	if !strings.Contains(stripANSI(app.DiffView.Viewport.View()), GlyphCollapsed) {
+		t.Fatalf("expected cyan '%s' matching-line marker in Split Diff Full Commit mode", GlyphCollapsed)
+	}
+	// Toggle Fold ('E') preserves DetailFilterBypass
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
+	app = resModel.(AppModel)
+	if !app.DetailFilterBypass {
+		t.Fatalf("expected 'E' fold toggle to preserve DetailFilterBypass=true")
+	}
+	// Click banner pill in Split Diff (using live workspace detailStartX, bannerRow == 3) twice -> false then true
+	splitLeftW, _, splitSepW := app.computeWorkspaceOuterWidths()
+	splitDetailStartX := splitLeftW + splitSepW
+	splitBannerRow := app.DiffView.FilterBannerRow()
+	sbStart, sbEnd := app.DiffView.FilterBannerHitRange()
+	if splitBannerRow != 3 || sbStart < 0 || sbEnd <= sbStart {
+		t.Fatalf("expected Split Diff FilterBannerRow=3 and valid hit range, got row=%d [%d,%d)", splitBannerRow, sbStart, sbEnd)
+	}
+	resModel, _ = app.Update(tea.MouseMsg{X: splitDetailStartX + 1 + sbStart + 1, Y: app.mainStartY() + 1 + splitBannerRow, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.DetailFilterBypass || app.DiffView.ShownChangeCount != scopedShown {
+		t.Fatalf("expected Split Diff banner click to re-scope (bypass=false, shown=%d), got bypass=%v shown=%d",
+			scopedShown, app.DetailFilterBypass, app.DiffView.ShownChangeCount)
+	}
+	sbStart, _ = app.DiffView.FilterBannerHitRange()
+	resModel, _ = app.Update(tea.MouseMsg{X: splitDetailStartX + 1 + sbStart + 1, Y: app.mainStartY() + 1 + splitBannerRow, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if !app.DetailFilterBypass {
+		t.Fatalf("expected second Split Diff banner click to re-enable Full Commit")
+	}
+	// Exit Split ('S') preserves DetailFilterBypass
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	app = resModel.(AppModel)
+	if app.DiffView.IsSplitActive() || !app.DetailFilterBypass {
+		t.Fatalf("expected exiting Split Diff to preserve DetailFilterBypass=true")
+	}
+	// Zoom ('z' / 'z') preserves DetailFilterBypass
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'z'}})
+	app = resModel.(AppModel)
+	if !app.Zoomed || !app.DetailFilterBypass {
+		t.Fatalf("expected Zoom ON to preserve DetailFilterBypass=true")
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'z'}})
+	app = resModel.(AppModel)
+	if app.Zoomed || !app.DetailFilterBypass {
+		t.Fatalf("expected Zoom OFF to preserve DetailFilterBypass=true")
+	}
+	// Tabs ('c' -> Config full + cyan ▸, 'b' -> Blame full + cyan ▸, 'd' -> Diff) preserve DetailFilterBypass
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	app = resModel.(AppModel)
+	if !app.DetailFilterBypass || app.ConfigView.ShownLineCount != app.ConfigView.TotalUnfilteredLines ||
+		!strings.Contains(stripANSI(app.ConfigView.Viewport.View()), GlyphCollapsed) {
+		t.Fatalf("expected Config tab to preserve DetailFilterBypass=true with full lines and cyan '%s'", GlyphCollapsed)
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	app = resModel.(AppModel)
+	if !app.DetailFilterBypass || app.BlameView.ShownEntryCount != app.BlameView.TotalUnfilteredEntries ||
+		!strings.Contains(stripANSI(app.BlameView.Viewport.View()), GlyphCollapsed) {
+		t.Fatalf("expected Blame tab to preserve DetailFilterBypass=true with full entries and cyan '%s'", GlyphCollapsed)
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	app = resModel.(AppModel)
+	if !app.DetailFilterBypass {
+		t.Fatalf("expected returning to Diff tab to preserve DetailFilterBypass=true")
+	}
+
+	// 7. Auto-rescope (DetailFilterBypass -> false) on configuration or filter changes
+	// 7a. Selecting a different commit in Timeline ('j')
+	app.setFocusedPane(PaneTimeline)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	app = resModel.(AppModel)
+	if app.selectedCommitSHA() != sha2 {
+		t.Fatalf("expected 'j' to select sha2 (%s), got %s", sha2, app.selectedCommitSHA())
+	}
+	if app.DetailFilterBypass {
+		t.Fatalf("expected commit change to auto-rescope DetailFilterBypass=false")
+	}
+
+	// 7b. Pinning Base commit ('m')
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'\\'}})
+	app = resModel.(AppModel)
+	if !app.DetailFilterBypass {
+		t.Fatalf("expected '\\' to enable DetailFilterBypass")
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	app = resModel.(AppModel)
+	if app.DetailFilterBypass {
+		t.Fatalf("expected 'm' base toggle to auto-rescope DetailFilterBypass=false")
+	}
+	// Unpin base
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	app = resModel.(AppModel)
+
+	// 7c. Toggling vs Running Config ('4')
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'\\'}})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'4'}})
+	app = resModel.(AppModel)
+	if app.DetailFilterBypass {
+		t.Fatalf("expected '4' live toggle to auto-rescope DetailFilterBypass=false")
+	}
+	// Exit VsLive
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'4'}})
+	app = resModel.(AppModel)
+
+	// 7d. Changing A/B endpoints via unified 2-config CommitPickerModal ('A')
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'\\'}})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
+	app = resModel.(AppModel)
+	if app.ActiveModal != ModalCommitPicker {
+		t.Fatalf("expected ModalCommitPicker after 'A'")
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	app = resModel.(AppModel)
+	app.CommitPickerModal.SelectedIndex = 1 // newest filtered commit (sha3)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	app = resModel.(AppModel)
+	app.CommitPickerModal.SelectedIndex = 2 // older filtered commit
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	app = resModel.(AppModel)
+	if app.DetailFilterBypass {
+		t.Fatalf("expected CommitPickerModal selection to auto-rescope DetailFilterBypass=false")
+	}
+	// Return to single-pane on sha3
+	if app.SplitDiff {
+		resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+		app = resModel.(AppModel)
+	}
+	app.selectCommitBySHA(sha3)
+	app.updateActiveTabContent()
+
+	// 7e. Changing filter query via '/'
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'\\'}})
+	app = resModel.(AppModel)
+	if !app.DetailFilterBypass {
+		t.Fatalf("expected DetailFilterBypass=true before filter edit")
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	app = resModel.(AppModel)
+	if app.DetailFilterBypass {
+		t.Fatalf("expected editing filter query to auto-rescope DetailFilterBypass=false")
+	}
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	app = resModel.(AppModel)
+
+	// 7f. Whitespace-only filter does not show Scope pill
+	app.FilterBar.TextInput.SetValue("   ")
+	if sX, eX := app.FilterBar.ScopeHitRange(); sX != -1 || eX != -1 {
+		t.Fatalf("expected whitespace-only filter to hide Scope pill, got [%d,%d)", sX, eX)
+	}
+
+	// 7g. Scalar value filter ("leaf-02" / "65002") yields identical ShownChangeCount in Single-Pane and Split Diff
+	for _, valQuery := range []string{"leaf-02", "65002"} {
+		app.FilterBar.TextInput.SetValue(valQuery)
+		app.setDetailFilterBypass(false)
+		app.SplitDiff = false
+		app.LeftCommitSHA = ""
+		app.RightCommitSHA = ""
+		app.leftCommit = nil
+		app.rightCommit = nil
+		app.ActiveTab = TabDiff
+		app.refreshTimeline()
+		singleShown := app.DiffView.ShownChangeCount
+		singleTotal := app.DiffView.TotalUnfilteredChanges
+		if singleShown != 1 || singleTotal <= singleShown {
+			t.Fatalf("scalar value filter %q in Single-Pane Diff expected shown=1 and total>1, got shown=%d total=%d",
+				valQuery, singleShown, singleTotal)
+		}
+		resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+		app = resModel.(AppModel)
+		if app.DiffView.ShownChangeCount != singleShown || app.DiffView.TotalUnfilteredChanges != singleTotal {
+			t.Fatalf("scalar value filter %q Split Diff counts (%d/%d) mismatch Single-Pane (%d/%d)",
+				valQuery, app.DiffView.ShownChangeCount, app.DiffView.TotalUnfilteredChanges, singleShown, singleTotal)
+		}
+		resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+		app = resModel.(AppModel)
+	}
+
+	// 8. Exact WxH & full-bleed SGR invariants across 136x36, 120x35, 80x24, 40x12 (Scoped & Full)
+	app.FilterBar.TextInput.SetValue("bgp")
+	app.refreshTimeline()
+	for _, bypass := range []bool{false, true} {
+		app.setDetailFilterBypass(bypass)
+		app.updateActiveTabContent()
+		for _, sz := range []struct{ w, h int }{
+			{136, 36},
+			{120, 35},
+			{80, 24},
+			{40, 12},
+		} {
+			resModel, _ = app.Update(tea.WindowSizeMsg{Width: sz.w, Height: sz.h})
+			app = resModel.(AppModel)
+			assertNoUnrecoveredReset(t, fmt.Sprintf("decoupled-filter-bypass=%v-%dx%d", bypass, sz.w, sz.h), app.View(), sz.w, sz.h)
+		}
+	}
+}
+
+func TestAppTimelineRibbonSGRBrushDragAndDoubleClickZoom(t *testing.T) {
+	_ = SetColorProfile("truecolor")
+	_, _ = SetTheme("dark")
+
+	repoDir := t.TempDir()
+	backend := gitbackend.NewGitBackend(repoDir)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	// Record 4 commits spread across a 12h gap with a tight recent cluster.
+	type seedCommit struct {
+		host string
+		ts   time.Time
+	}
+	seeds := []seedCommit{
+		{"leaf-01", now.Add(-12 * time.Hour)},
+		{"leaf-02", now.Add(-6 * time.Minute)},
+		{"leaf-03", now.Add(-3 * time.Minute)},
+		{"leaf-04", now},
+	}
+	for i, s := range seeds {
+		cfg := map[string]interface{}{
+			"system": map[string]interface{}{"name": map[string]interface{}{"host-name": s.host}},
+		}
+		if _, _, err := backend.RecordConfigChange(cfg, "admin", fmt.Sprintf("%d", i+1), "", s.ts, fmt.Sprintf("commit %d", i+1), nil); err != nil {
+			t.Fatalf("RecordConfigChange %d: %v", i, err)
+		}
+	}
+
+	app := NewAppModel(backend, nil, "")
+	resModel, _ := app.Update(tea.WindowSizeMsg{Width: 120, Height: 35})
+	app = resModel.(AppModel)
+	if len(app.allCommits) != 4 {
+		t.Fatalf("expected 4 commits, got %d", len(app.allCommits))
+	}
+
+	clk := now
+	app.TimelineRibbon.nowFunc = func() time.Time { return clk }
+	origSpan := app.TimelineRibbon.WindowEnd.Sub(app.TimelineRibbon.WindowStart)
+
+	// 1. SGR Bubble Tea v0.25 click-and-drag brush on timeline plot row (Y=3 -> relY=1):
+	//    Note: in Bubble Tea v0.25 SGR mode, drag motion carries Action=MouseActionMotion AND Type=MouseLeft!
+	resModel, _ = app.Update(tea.MouseMsg{X: 70, Y: 3, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.MouseMsg{X: 118, Y: 3, Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.TimelineRibbon.DragMode != "brush" || !app.TimelineRibbon.brushDragged {
+		t.Fatalf("expected active SGR brush drag, got mode=%q dragged=%v", app.TimelineRibbon.DragMode, app.TimelineRibbon.brushDragged)
+	}
+	assertNoUnrecoveredReset(t, "app-sgr-brush-live", app.View(), 120, 35)
+	resModel, _ = app.Update(tea.MouseMsg{X: 118, Y: 3, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, Type: tea.MouseRelease})
+	app = resModel.(AppModel)
+	if app.TimelineRibbon.DragMode != "" {
+		t.Fatalf("expected DragMode cleared on release, got %q", app.TimelineRibbon.DragMode)
+	}
+	if app.TimelineRibbon.WindowEnd.Sub(app.TimelineRibbon.WindowStart) >= origSpan {
+		t.Fatalf("expected SGR brush drag to narrow window")
+	}
+	if len(app.TimelineView.Commits) != 3 {
+		t.Fatalf("expected TimelineView synced to 3 recent commits after brush drag, got %d", len(app.TimelineView.Commits))
+	}
+
+	// 2. SGR overview scrubber handle drag (Action=MouseActionMotion, Type=MouseLeft) moves left edge cleanly.
+	app.TimelineRibbon.ResetWindow()
+	app.syncWindowCommits()
+	layout := app.TimelineRibbon.computeLayout()
+	resModel, _ = app.Update(tea.MouseMsg{X: layout.leftHandleX, Y: 6, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.MouseMsg{X: layout.leftHandleX + 20, Y: 6, Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.MouseMsg{X: layout.leftHandleX + 20, Y: 6, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, Type: tea.MouseRelease})
+	app = resModel.(AppModel)
+	if !app.TimelineRibbon.WindowStart.After(app.TimelineRibbon.FullMinTime) {
+		t.Fatalf("expected SGR overview left-handle drag to move WindowStart right")
+	}
+
+	// 3. Double-click on plot row progressively narrows the window around the clicked cluster!
+	app.TimelineRibbon.ResetWindow()
+	app.syncWindowCommits()
+	spanBefore := app.TimelineRibbon.WindowEnd.Sub(app.TimelineRibbon.WindowStart)
+	clk = clk.Add(1 * time.Second)
+	resModel, _ = app.Update(tea.MouseMsg{X: 117, Y: 4, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.MouseMsg{X: 117, Y: 4, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, Type: tea.MouseRelease})
+	app = resModel.(AppModel)
+	clk = clk.Add(150 * time.Millisecond)
+	resModel, _ = app.Update(tea.MouseMsg{X: 117, Y: 4, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.MouseMsg{X: 117, Y: 4, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, Type: tea.MouseRelease})
+	app = resModel.(AppModel)
+
+	spanAfter := app.TimelineRibbon.WindowEnd.Sub(app.TimelineRibbon.WindowStart)
+	if spanAfter >= spanBefore {
+		t.Fatalf("expected double-click on ribbon to narrow window: before=%v after=%v", spanBefore, spanAfter)
+	}
+	if len(app.TimelineView.Commits) != 3 {
+		t.Fatalf("expected double-click zoom on recent cluster to keep 3 recent commits in TimelineView, got %d", len(app.TimelineView.Commits))
+	}
+
+	// 4. Shift+Click in the Left Commit List & Visual Timeline Ribbon automatically opens Split Diff
+	//    between the currently selected commit and the Shift+Clicked commit (older->A, newer->B)!
+	app.TimelineRibbon.ResetWindow()
+	app.syncWindowCommits()
+	// allCommits order (newest-first): [0]=leaf-04 (newest), [1]=leaf-03, [2]=leaf-02, [3]=leaf-01 (oldest)
+	cNewest := app.TimelineView.Commits[0].FullSHA
+	cMidNew := app.TimelineView.Commits[1].FullSHA
+	cMidOld := app.TimelineView.Commits[2].FullSHA
+	cOldest := app.TimelineView.Commits[3].FullSHA
+
+	// 4a. Select older commit (idx 2 = cMidOld), then Shift+Click newer commit (idx 0 = cNewest) in Left Commit List.
+	app.TimelineView.SelectIndex(2)
+	app.syncCompareMarkers()
+	app.updateActiveTabContent()
+	mainStartY := app.mainStartY()
+	lpc := app.TimelineView.LinesPerCommit()
+	if lpc < 1 {
+		lpc = 2
+	}
+	clickYRow0 := mainStartY + 1 + 0*lpc
+	resModel, _ = app.Update(tea.MouseMsg{X: 8, Y: clickYRow0, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Type: tea.MouseLeft, Shift: true})
+	app = resModel.(AppModel)
+	if !app.SplitDiff || app.ActiveTab != TabDiff || app.FocusedPane != PaneDetail {
+		t.Fatalf("expected Shift+Click in Left Commit List to enter SplitDiff on TabDiff/PaneDetail, got split=%v tab=%v focus=%v",
+			app.SplitDiff, app.ActiveTab, app.FocusedPane)
+	}
+	if app.LeftCommitSHA != cMidOld || app.RightCommitSHA != cNewest {
+		t.Fatalf("expected Shift+Click (selected older -> shift-click newer) A=%s B=%s, got A=%s B=%s",
+			cMidOld, cNewest, app.LeftCommitSHA, app.RightCommitSHA)
+	}
+
+	// 4b. Exit split view ('S'), select newer commit (idx 1 = cMidNew), then Shift+Click oldest (idx 3 = cOldest):
+	//     must compare cOldest (A) <-> cMidNew (B), NOT stale cNewest!
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	app = resModel.(AppModel)
+	app.TimelineView.SelectIndex(1)
+	app.syncCompareMarkers()
+	app.updateActiveTabContent()
+	clickYRow3 := mainStartY + 1 + 3*lpc
+	resModel, _ = app.Update(tea.MouseMsg{X: 8, Y: clickYRow3, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Type: tea.MouseLeft, Shift: true})
+	app = resModel.(AppModel)
+	if !app.SplitDiff || app.LeftCommitSHA != cOldest || app.RightCommitSHA != cMidNew {
+		t.Fatalf("expected Shift+Click (selected newer -> shift-click older) A=%s B=%s, got split=%v A=%s B=%s",
+			cOldest, cMidNew, app.SplitDiff, app.LeftCommitSHA, app.RightCommitSHA)
+	}
+
+	// 4c. Shift+Clicking the SAME selected commit does NOT enter empty A==B split view.
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	app = resModel.(AppModel)
+	app.TimelineView.SelectIndex(1)
+	clickYRow1 := mainStartY + 1 + 1*lpc
+	resModel, _ = app.Update(tea.MouseMsg{X: 8, Y: clickYRow1, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Type: tea.MouseLeft, Shift: true})
+	app = resModel.(AppModel)
+	if app.SplitDiff {
+		t.Fatalf("expected Shift+Click on already-selected commit NOT to open empty A==B split diff")
+	}
+
+	// 4d. Visual Timeline Ribbon: select oldest commit (idx 3 = cOldest), Shift+Click newest dot on right edge of ribbon!
+	app.TimelineView.SelectIndex(3)
+	app.syncCompareMarkers()
+	app.updateActiveTabContent()
+	resModel, _ = app.Update(tea.MouseMsg{X: 118, Y: 4, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Type: tea.MouseLeft, Shift: true})
+	app = resModel.(AppModel)
+	if !app.SplitDiff || app.LeftCommitSHA != cOldest || app.RightCommitSHA == cOldest || app.RightCommitSHA == "" {
+		t.Fatalf("expected Shift+Click on right ribbon cluster while oldest selected to open SplitDiff A=%s B=<recent>, got split=%v A=%s B=%s",
+			cOldest, app.SplitDiff, app.LeftCommitSHA, app.RightCommitSHA)
+	}
+
+	// 4e. Ctrl+Click, Alt+Click, and Right-Click aliases work identically in Left Commit List & Ribbon!
+	for _, tc := range []struct {
+		name string
+		msg  tea.MouseMsg
+	}{
+		{
+			name: "ctrl+click-list",
+			msg:  tea.MouseMsg{X: 8, Y: clickYRow0, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Type: tea.MouseLeft, Ctrl: true},
+		},
+		{
+			name: "alt+click-list",
+			msg:  tea.MouseMsg{X: 8, Y: clickYRow0, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Type: tea.MouseLeft, Alt: true},
+		},
+		{
+			name: "right-click-list",
+			msg:  tea.MouseMsg{X: 8, Y: clickYRow0, Action: tea.MouseActionPress, Button: tea.MouseButtonRight, Type: tea.MouseRight},
+		},
+	} {
+		// Exit split view, select cMidOld (idx 2), then trigger compare alias on row 0 (cNewest).
+		if app.SplitDiff {
+			resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+			app = resModel.(AppModel)
+		}
+		app.TimelineView.SelectIndex(2)
+		app.syncCompareMarkers()
+		app.updateActiveTabContent()
+
+		resModel, _ = app.Update(tc.msg)
+		app = resModel.(AppModel)
+		if !app.SplitDiff || app.LeftCommitSHA != cMidOld || app.RightCommitSHA != cNewest {
+			t.Fatalf("%s: expected SplitDiff A=%s B=%s, got split=%v A=%s B=%s",
+				tc.name, cMidOld, cNewest, app.SplitDiff, app.LeftCommitSHA, app.RightCommitSHA)
+		}
+	}
+
+	// 4f. Ctrl+Click on Visual Timeline Ribbon dot works identically.
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	app = resModel.(AppModel)
+	app.TimelineView.SelectIndex(3) // cOldest
+	app.syncCompareMarkers()
+	app.updateActiveTabContent()
+	resModel, _ = app.Update(tea.MouseMsg{X: 118, Y: 4, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Type: tea.MouseLeft, Ctrl: true})
+	app = resModel.(AppModel)
+	if !app.SplitDiff || app.LeftCommitSHA != cOldest || app.RightCommitSHA == cOldest || app.RightCommitSHA == "" {
+		t.Fatalf("ctrl+click-ribbon: expected SplitDiff A=%s B=<recent>, got split=%v A=%s B=%s",
+			cOldest, app.SplitDiff, app.LeftCommitSHA, app.RightCommitSHA)
+	}
+
+	// 5. Kernel inotify HEAD watcher delivers live commits to AppModel in sub-second time (far faster than 5s fallback).
+	app.headWatch.start(backend.RepoDir, backend, app.headEventChan)
+	defer app.headWatch.stop()
+
+	newCfg := map[string]interface{}{
+		"system": map[string]interface{}{"name": map[string]interface{}{"host-name": "leaf-live-05"}},
+	}
+	t0 := time.Now()
+	_, newSHA, err := backend.RecordConfigChange(newCfg, "admin", "5", "", time.Now().UTC(), "live instant commit", nil)
+	if err != nil || newSHA == "" {
+		t.Fatalf("RecordConfigChange live commit failed: sha=%q err=%v", newSHA, err)
+	}
+	select {
+	case gotSHA := <-app.headEventChan:
+		if gotSHA != newSHA {
+			t.Fatalf("expected headWatch event SHA %q, got %q", newSHA, gotSHA)
+		}
+		if time.Since(t0) > 500*time.Millisecond {
+			t.Fatalf("expected instant (<500ms) inotify HEAD event, took %v", time.Since(t0))
+		}
+		// Feeding headWatchMsg into Update refreshes TimelineView immediately with the new commit!
+		resModel, _ = app.Update(headWatchMsg{sha: gotSHA})
+		app = resModel.(AppModel)
+		if app.lastHeadSHA != newSHA || len(app.allCommits) != 5 {
+			t.Fatalf("expected headWatchMsg to refresh AppModel to 5 commits with head=%s, got head=%s count=%d",
+				newSHA, app.lastHeadSHA, len(app.allCommits))
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timed out waiting for inotify HEAD watch event")
+	}
+}
+
+func TestScrollbarClickJumpAndSGRDragAcrossConfigDiffBlameAndTimeline(t *testing.T) {
+	_ = SetColorProfile("truecolor")
+	_, _ = SetTheme("dark")
+
+	repoDir := t.TempDir()
+	backend := gitbackend.NewGitBackend(repoDir)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// Build two large configs (~80 interfaces -> >160 CLI lines) + 20 commits so every pane has a live scrollbar!
+	makeLargeCfg := func(prefix string, count int) map[string]interface{} {
+		ifaces := make([]interface{}, 0, count)
+		for i := 1; i <= count; i++ {
+			ifaces = append(ifaces, map[string]interface{}{
+				"name":        fmt.Sprintf("ethernet-1/%d", i),
+				"admin-state": "enable",
+				"description": fmt.Sprintf("%s-port-%02d", prefix, i),
+			})
+		}
+		return map[string]interface{}{
+			"interface": ifaces,
+			"system":    map[string]interface{}{"name": map[string]interface{}{"host-name": prefix}},
+		}
+	}
+
+	for i := 0; i < 18; i++ {
+		cfg := makeLargeCfg(fmt.Sprintf("leaf-%02d", i+1), 45)
+		if _, _, err := backend.RecordConfigChange(cfg, "admin", fmt.Sprintf("%d", i+1), "", now.Add(-time.Duration(20-i)*time.Minute), fmt.Sprintf("bulk commit %d", i+1), nil); err != nil {
+			t.Fatalf("RecordConfigChange %d: %v", i, err)
+		}
+	}
+
+	app := NewAppModel(backend, nil, "")
+	resModel, _ := app.Update(tea.WindowSizeMsg{Width: 136, Height: 30})
+	app = resModel.(AppModel)
+
+	mainStartY := app.mainStartY()
+	leftOuterW, detailOuterW, sepW := app.computeWorkspaceOuterWidths()
+	detailStartX := leftOuterW + sepW
+	detailSbX := detailStartX + detailOuterW - 2
+	timelineSbX := leftOuterW - 2
+
+	// 1. DiffView (Single-Pane): click bottom of scrollbar track -> jumps to maxOffset, then click top -> 0!
+	vp, totalLines, trackStartY, trackH, _ := app.scrollbarTargetMetrics("detail", mainStartY)
+	if totalLines <= trackH {
+		t.Fatalf("expected scrollable DiffView, got totalLines=%d trackH=%d", totalLines, trackH)
+	}
+	maxOff := totalLines - trackH
+	// Click bottom cell of scrollbar track
+	resModel, _ = app.Update(tea.MouseMsg{X: detailSbX, Y: trackStartY + trackH - 1, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.DiffView.Viewport.YOffset != maxOff {
+		t.Fatalf("DiffView click bottom of scrollbar: expected YOffset=%d, got %d", maxOff, app.DiffView.Viewport.YOffset)
+	}
+	resModel, _ = app.Update(tea.MouseMsg{X: detailSbX, Y: trackStartY + trackH - 1, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, Type: tea.MouseRelease})
+	app = resModel.(AppModel)
+	if app.scrollDragTarget != "" {
+		t.Fatalf("expected scrollDragTarget cleared on release, got %q", app.scrollDragTarget)
+	}
+	// Click middle of scrollbar track -> jumps near midpoint!
+	midY := trackStartY + trackH/2
+	resModel, _ = app.Update(tea.MouseMsg{X: detailSbX, Y: midY, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.DiffView.Viewport.YOffset <= 0 || app.DiffView.Viewport.YOffset >= maxOff {
+		t.Fatalf("DiffView click mid scrollbar: expected 0 < YOffset < %d, got %d", maxOff, app.DiffView.Viewport.YOffset)
+	}
+	// Drag thumb back to top while cursor drifts far left (X=20) -> must keep scrubbing smoothly!
+	resModel, _ = app.Update(tea.MouseMsg{X: 20, Y: trackStartY, Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.DiffView.Viewport.YOffset != 0 {
+		t.Fatalf("DiffView drag scrollbar to top with horizontal drift: expected YOffset=0, got %d", app.DiffView.Viewport.YOffset)
+	}
+	resModel, _ = app.Update(tea.MouseMsg{X: 20, Y: trackStartY, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, Type: tea.MouseRelease})
+	app = resModel.(AppModel)
+
+	// 2. ConfigView: grab thumb at top (zero jump on initial press), SGR drag down -> advances YOffset!
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	app = resModel.(AppModel)
+	vp, totalLines, trackStartY, trackH, _ = app.scrollbarTargetMetrics("detail", mainStartY)
+	if totalLines <= trackH || vp.YOffset != 0 {
+		t.Fatalf("expected scrollable ConfigView at YOffset=0, got total=%d trackH=%d yOff=%d", totalLines, trackH, vp.YOffset)
+	}
+	// Grab on thumb top cell
+	resModel, _ = app.Update(tea.MouseMsg{X: detailSbX, Y: trackStartY, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.ConfigView.Viewport.YOffset != 0 || app.scrollDragTarget != "detail" {
+		t.Fatalf("ConfigView grab thumb should preserve YOffset=0 and arm drag, got yOff=%d target=%q", app.ConfigView.Viewport.YOffset, app.scrollDragTarget)
+	}
+	// Drag 6 rows downward
+	resModel, _ = app.Update(tea.MouseMsg{X: detailSbX, Y: trackStartY + 6, Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.ConfigView.Viewport.YOffset <= 0 {
+		t.Fatalf("ConfigView drag scrollbar down should advance YOffset > 0, got %d", app.ConfigView.Viewport.YOffset)
+	}
+	resModel, _ = app.Update(tea.MouseMsg{X: detailSbX, Y: trackStartY + 6, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, Type: tea.MouseRelease})
+	app = resModel.(AppModel)
+	assertNoUnrecoveredReset(t, "config-scrollbar-dragged", app.View(), 136, 30)
+
+	// 3. Split-Pane Diff: click bottom of scrollbar track -> jumps cleanly!
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	app = resModel.(AppModel)
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	app = resModel.(AppModel)
+	leftOuterW, detailOuterW, sepW = app.computeWorkspaceOuterWidths()
+	detailSbX = leftOuterW + sepW + detailOuterW - 2
+	_, totalLines, trackStartY, trackH, _ = app.scrollbarTargetMetrics("detail", mainStartY)
+	if totalLines > trackH {
+		resModel, _ = app.Update(tea.MouseMsg{X: detailSbX, Y: trackStartY + trackH - 1, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Type: tea.MouseLeft})
+		app = resModel.(AppModel)
+		if app.DiffView.Viewport.YOffset != totalLines-trackH {
+			t.Fatalf("Split Diff click bottom scrollbar: expected %d, got %d", totalLines-trackH, app.DiffView.Viewport.YOffset)
+		}
+		resModel, _ = app.Update(tea.MouseMsg{X: detailSbX, Y: trackStartY + trackH - 1, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, Type: tea.MouseRelease})
+		app = resModel.(AppModel)
+	}
+	// Exit split diff for TimelineView scrollbar check
+	resModel, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	app = resModel.(AppModel)
+
+	// 4. TimelineView (Left Panel): clicking scrollbar scrolls viewport WITHOUT changing selected commit!
+	leftOuterW, _, _ = app.computeWorkspaceOuterWidths()
+	timelineSbX = leftOuterW - 2
+	selBefore := app.selectedCommitSHA()
+	_, tlTotal, tlStartY, tlH, _ := app.scrollbarTargetMetrics("timeline", mainStartY)
+	if tlTotal <= tlH {
+		t.Fatalf("expected scrollable TimelineView with 18 commits, got total=%d trackH=%d", tlTotal, tlH)
+	}
+	resModel, _ = app.Update(tea.MouseMsg{X: timelineSbX, Y: tlStartY + tlH - 1, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, Type: tea.MouseLeft})
+	app = resModel.(AppModel)
+	if app.TimelineView.Viewport.YOffset != tlTotal-tlH {
+		t.Fatalf("TimelineView click bottom scrollbar: expected YOffset=%d, got %d", tlTotal-tlH, app.TimelineView.Viewport.YOffset)
+	}
+	if app.selectedCommitSHA() != selBefore {
+		t.Fatalf("TimelineView scrollbar click must NOT change selected commit: before=%s after=%s", selBefore, app.selectedCommitSHA())
+	}
+	resModel, _ = app.Update(tea.MouseMsg{X: timelineSbX, Y: tlStartY + tlH - 1, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, Type: tea.MouseRelease})
+	app = resModel.(AppModel)
+	assertNoUnrecoveredReset(t, "timeline-scrollbar-dragged", app.View(), 136, 30)
 }

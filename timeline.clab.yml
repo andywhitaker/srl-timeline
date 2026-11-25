@@ -10,3 +10,4 @@ topology:
       binds:
         - bin/timeline:/usr/local/bin/timeline
         - timeline_config.yml:/etc/opt/srlinux/appmgr/timeline_config.yml
+        - cli-plugins/timeline.py:/etc/opt/srlinux/cli/plugins/timeline.py

@@ -21,11 +21,12 @@ var defaultQuickFilterChips = []string{"interface", "bgp", "ospf", "acl", "syste
 
 // FilterBarModel manages the search and scoped filter input bar.
 type FilterBarModel struct {
-	TextInput  textinput.Model
-	MatchCount int
-	TotalCount int
-	Width      int
-	IsFocused  bool
+	TextInput    textinput.Model
+	MatchCount   int
+	TotalCount   int
+	Width        int
+	IsFocused    bool
+	DetailBypass bool
 }
 
 // NewFilterBarModel creates a new FilterBar component.
@@ -122,13 +123,15 @@ func (m FilterBarModel) Update(msg tea.Msg) (FilterBarModel, tea.Cmd) {
 type filterBarLayout struct {
 	line        string
 	chips       []HitChip
+	scopeStartX int
+	scopeEndX   int
 	clearStartX int
 	clearEndX   int
 }
 
 func (m FilterBarModel) computeLayout() filterBarLayout {
 	if m.Width <= 0 {
-		return filterBarLayout{clearStartX: -1, clearEndX: -1}
+		return filterBarLayout{scopeStartX: -1, scopeEndX: -1, clearStartX: -1, clearEndX: -1}
 	}
 
 	m.RefreshStyles()
@@ -141,6 +144,8 @@ func (m FilterBarModel) computeLayout() filterBarLayout {
 	if m.Width < 4 {
 		return filterBarLayout{
 			line:        PaintBarLine("/", m.Width, bgColor, ColorActive),
+			scopeStartX: -1,
+			scopeEndX:   -1,
 			clearStartX: -1,
 			clearEndX:   -1,
 		}
@@ -148,13 +153,45 @@ func (m FilterBarModel) computeLayout() filterBarLayout {
 
 	innerW := m.Width - 2 // 1-col left and right padding
 
-	// Build right cluster: [match count badge] [  [× Clear]]
-	var rightParts []string
+	// Build right cluster: [[scope pill] ] [match count badge] [ [× Clear]]
 	hasFilter := m.Value() != ""
-	var clearBtnStr string
-	clearBtnW := 0
-	showClear := false
+	gapStr := lipgloss.NewStyle().Background(bgColor).Render(" ")
 
+	var scopePillStr string
+	scopePillW := 0
+	showScope := false
+	if strings.TrimSpace(m.Value()) != "" && innerW >= 54 {
+		var scopeLabel string
+		var scopeStyle lipgloss.Style
+		if m.DetailBypass {
+			if innerW >= 70 {
+				scopeLabel = "Scope: TL only"
+			} else {
+				scopeLabel = "TL only"
+			}
+			scopeStyle = lipgloss.NewStyle().
+				Background(ColorPrimary).
+				Foreground(ColorOnAccent).
+				Bold(true).
+				Padding(0, 1)
+		} else {
+			if innerW >= 70 {
+				scopeLabel = "Scope: TL+Detail"
+			} else {
+				scopeLabel = "TL+Detail"
+			}
+			scopeStyle = lipgloss.NewStyle().
+				Background(ColorBadgeBg).
+				Foreground(ColorWarning).
+				Padding(0, 1)
+		}
+		scopePillStr = scopeStyle.Render(scopeLabel)
+		scopePillW = lipgloss.Width(scopePillStr)
+		showScope = true
+	}
+
+	var countBadgeStr string
+	showCount := false
 	if m.TotalCount > 0 {
 		countText := fmt.Sprintf("%d/%d", m.MatchCount, m.TotalCount)
 		var countStyle lipgloss.Style
@@ -178,9 +215,13 @@ func (m FilterBarModel) computeLayout() filterBarLayout {
 				Foreground(ColorMuted).
 				Padding(0, 1)
 		}
-		rightParts = append(rightParts, countStyle.Render(countText))
+		countBadgeStr = countStyle.Render(countText)
+		showCount = true
 	}
 
+	var clearBtnStr string
+	clearBtnW := 0
+	showClear := false
 	if hasFilter {
 		clearBtnStr = lipgloss.NewStyle().
 			Background(ColorDangerBg).
@@ -188,25 +229,49 @@ func (m FilterBarModel) computeLayout() filterBarLayout {
 			Bold(true).
 			Render("[× Clear]")
 		clearBtnW = lipgloss.Width(clearBtnStr)
-		if len(rightParts) > 0 {
-			rightParts = append(rightParts, lipgloss.NewStyle().Background(bgColor).Render(" "))
-		}
-		rightParts = append(rightParts, clearBtnStr)
 		showClear = true
 	}
 
-	rightContent := strings.Join(rightParts, "")
-	rightW := lipgloss.Width(rightContent)
+	buildRight := func(incScope, incCount, incClear bool) (string, int) {
+		var parts []string
+		if incScope {
+			parts = append(parts, scopePillStr)
+		}
+		if incCount {
+			if len(parts) > 0 {
+				parts = append(parts, gapStr)
+			}
+			parts = append(parts, countBadgeStr)
+		}
+		if incClear {
+			if len(parts) > 0 {
+				parts = append(parts, gapStr)
+			}
+			parts = append(parts, clearBtnStr)
+		}
+		s := strings.Join(parts, "")
+		return s, lipgloss.Width(s)
+	}
+
+	rightContent, rightW := buildRight(showScope, showCount, showClear)
 
 	// Guard against narrow widths where right cluster alone crowds out the prompt.
+	if showScope && rightW > innerW-10 {
+		showScope = false
+		rightContent, rightW = buildRight(false, showCount, showClear)
+	}
 	if rightW > innerW-4 {
 		if showClear && clearBtnW <= innerW-4 {
+			showScope = false
+			showCount = false
 			rightContent = clearBtnStr
 			rightW = clearBtnW
 		} else {
+			showScope = false
+			showCount = false
+			showClear = false
 			rightContent = ""
 			rightW = 0
-			showClear = false
 		}
 	}
 
@@ -226,7 +291,6 @@ func (m FilterBarModel) computeLayout() filterBarLayout {
 			Background(ColorBadgeBg).
 			Foreground(ColorMuted).
 			Padding(0, 1)
-		gapStr := lipgloss.NewStyle().Background(bgColor).Render(" ")
 
 		var chipPieces []string
 		totalChipsW := 0
@@ -318,10 +382,21 @@ func (m FilterBarModel) computeLayout() filterBarLayout {
 
 	fullLine := PaintBarLine(middle.String(), m.Width, bgColor, ColorText)
 
+	rightStartX := 1 + leftW + spacerW + chipsW + chipsRightGapW
+	scopeStartX, scopeEndX := -1, -1
+	if showScope {
+		scopeStartX = rightStartX
+		scopeEndX = scopeStartX + scopePillW
+		if scopeStartX < 0 || scopeEndX > m.Width-1 {
+			scopeStartX = -1
+			scopeEndX = -1
+		}
+	}
+
 	clearStartX, clearEndX := -1, -1
 	if showClear {
 		// Clear button is the rightmost element inside innerW.
-		clearEndX = 1 + leftW + spacerW + chipsW + chipsRightGapW + rightW
+		clearEndX = rightStartX + rightW
 		if clearEndX > m.Width-1 {
 			clearEndX = m.Width - 1
 		}
@@ -335,6 +410,8 @@ func (m FilterBarModel) computeLayout() filterBarLayout {
 	return filterBarLayout{
 		line:        fullLine,
 		chips:       hitChips,
+		scopeStartX: scopeStartX,
+		scopeEndX:   scopeEndX,
 		clearStartX: clearStartX,
 		clearEndX:   clearEndX,
 	}
@@ -344,6 +421,14 @@ func (m FilterBarModel) computeLayout() filterBarLayout {
 // of visible quick-filter chips, or nil when chips are not displayed.
 func (m FilterBarModel) QuickChipHitRanges() []HitChip {
 	return m.computeLayout().chips
+}
+
+// ScopeHitRange returns the exact rendered horizontal column range [startX, endX)
+// of the clickable scope pill ("Scope: TL+Detail" / "Scope: TL only"),
+// or (-1, -1) when no filter is active or the terminal is too narrow.
+func (m FilterBarModel) ScopeHitRange() (startX, endX int) {
+	l := m.computeLayout()
+	return l.scopeStartX, l.scopeEndX
 }
 
 // ClearHitRange returns the exact rendered horizontal column range [startX, endX)

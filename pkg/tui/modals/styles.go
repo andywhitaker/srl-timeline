@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
-	"github.com/muesli/ansi"
 	"github.com/muesli/reflow/truncate"
 	"github.com/muesli/termenv"
 )
@@ -520,6 +520,11 @@ func RegisterThemeListener(fn func(Theme)) {
 }
 
 func applyModalTheme(t Theme) {
+	baseSGRCacheMu.Lock()
+	clear(baseSGRCache)
+	clear(styleSGRCache)
+	baseSGRCacheMu.Unlock()
+
 	lipgloss.SetHasDarkBackground(t.IsDark)
 	ColorBackground = t.Background
 	ColorSurface = t.Surface
@@ -622,7 +627,94 @@ func StyleTextInput(ti *textinput.Model, bg, fg, dimFg, accentFg lipgloss.Color)
 	ti.Cursor.TextStyle = lipgloss.NewStyle().Foreground(fg).Background(bg)
 }
 
+type baseSGRKey struct {
+	bg lipgloss.Color
+	fg lipgloss.Color
+}
+
+type styleSGRKey struct {
+	bg        lipgloss.Color
+	fg        lipgloss.Color
+	bold      bool
+	italic    bool
+	underline bool
+}
+
+var (
+	baseSGRCacheMu sync.RWMutex
+	baseSGRCache   = make(map[baseSGRKey]string, 64)
+	styleSGRCache  = make(map[styleSGRKey]string, 128)
+)
+
+// StyleSGR returns the cached ANSI SGR opening prefix for the given colors and text attributes
+// under the active Lip Gloss color profile (or "" in ASCII/no-color mode).
+func StyleSGR(bg, fg lipgloss.Color, bold, italic, underline bool) string {
+	key := styleSGRKey{bg: bg, fg: fg, bold: bold, italic: italic, underline: underline}
+	baseSGRCacheMu.RLock()
+	if cached, ok := styleSGRCache[key]; ok {
+		baseSGRCacheMu.RUnlock()
+		return cached
+	}
+	baseSGRCacheMu.RUnlock()
+
+	st := lipgloss.NewStyle()
+	if bg != "" {
+		st = st.Background(bg)
+	}
+	if fg != "" {
+		st = st.Foreground(fg)
+	}
+	if bold {
+		st = st.Bold(true)
+	}
+	if italic {
+		st = st.Italic(true)
+	}
+	if underline {
+		st = st.Underline(true)
+	}
+	rendered := st.Render("\x00")
+	idx := strings.IndexByte(rendered, '\x00')
+	var res string
+	if idx > 0 {
+		res = rendered[:idx]
+	}
+
+	baseSGRCacheMu.Lock()
+	styleSGRCache[key] = res
+	baseSGRCacheMu.Unlock()
+	return res
+}
+
+// WrapSGR wraps text in sgr + text + "\x1b[0m" when sgr is non-empty, else returns text verbatim.
+func WrapSGR(sgr, text string) string {
+	if sgr == "" || text == "" {
+		return text
+	}
+	return sgr + text + "\x1b[0m"
+}
+
+// fastRuneWidth returns the terminal cell width of r, fast-pathing printable ASCII and
+// deterministic single-width box-drawing/block/geometric/arrow glyphs used across the TUI.
+func fastRuneWidth(r rune) int {
+	if r >= 0x20 && r < 0x7f {
+		return 1
+	}
+	if (r >= 0x2500 && r <= 0x25FF) || (r >= 0x2190 && r <= 0x21FF) || r == 0x00B7 || r == 0x2026 || r == 0x2713 || r == 0x2715 || r == 0x00D7 {
+		return 1
+	}
+	return runewidth.RuneWidth(r)
+}
+
 func baseSGR(bg, fg lipgloss.Color) string {
+	key := baseSGRKey{bg: bg, fg: fg}
+	baseSGRCacheMu.RLock()
+	if cached, ok := baseSGRCache[key]; ok {
+		baseSGRCacheMu.RUnlock()
+		return cached
+	}
+	baseSGRCacheMu.RUnlock()
+
 	st := lipgloss.NewStyle()
 	if bg != "" {
 		st = st.Background(bg)
@@ -632,10 +724,211 @@ func baseSGR(bg, fg lipgloss.Color) string {
 	}
 	rendered := st.Render("\x00")
 	idx := strings.IndexByte(rendered, '\x00')
-	if idx <= 0 {
-		return ""
+	var res string
+	if idx > 0 {
+		res = rendered[:idx]
 	}
-	return rendered[:idx]
+
+	baseSGRCacheMu.Lock()
+	baseSGRCache[key] = res
+	baseSGRCacheMu.Unlock()
+	return res
+}
+
+// skipANSISeq advances past a CSI (\x1b[...) or OSC (\x1b]...) escape sequence starting at s[i].
+// Returns the index immediately after the sequence, or -1 if s[i] does not start a recognized sequence.
+func skipANSISeq(s string, i int) int {
+	n := len(s)
+	if i+1 >= n || s[i] != '\x1b' {
+		return -1
+	}
+	if s[i+1] == '[' {
+		end := i + 2
+		for end < n && (s[end] < 0x40 || s[end] > 0x7E) {
+			end++
+		}
+		if end < n {
+			return end + 1
+		}
+		return end
+	}
+	if s[i+1] == ']' {
+		end := i + 2
+		for end < n {
+			if s[end] == '\x07' {
+				return end + 1
+			}
+			if s[end] == '\x1b' && end+1 < n && s[end+1] == '\\' {
+				return end + 2
+			}
+			end++
+		}
+		return end
+	}
+	return -1
+}
+
+// fastPrintableWidth computes the printable cell width of s ignoring ANSI CSI/OSC sequences,
+// fast-pathing printable ASCII bytes without UTF-8 or runewidth calls.
+func fastPrintableWidth(s string) int {
+	w := 0
+	n := len(s)
+	i := 0
+	for i < n {
+		c := s[i]
+		if c == '\x1b' {
+			if next := skipANSISeq(s, i); next > i {
+				i = next
+				continue
+			}
+		}
+		if c >= 0x20 && c < 0x7f {
+			w++
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			i++
+			continue
+		}
+		w += fastRuneWidth(r)
+		i += size
+	}
+	return w
+}
+
+// isAlreadyPaintedLine reports whether line is already a single-row, exact-width,
+// full-bleed ANSI-safe string (starts with SGR, ends with \x1b[0m, no unrecovered resets,
+// no \r/\n/\t, and printable width == width).
+func isAlreadyPaintedLine(line string, width int) bool {
+	if width <= 0 || len(line) < 7 {
+		return false
+	}
+	if !strings.HasPrefix(line, "\x1b[") || !strings.HasSuffix(line, "\x1b[0m") {
+		return false
+	}
+	bodyEnd := len(line) - 4 // exclude trailing "\x1b[0m"
+	w := 0
+	i := 0
+	for i < bodyEnd {
+		c := line[i]
+		if c == '\r' || c == '\n' || c == '\t' {
+			return false
+		}
+		if c == '\x1b' {
+			if i+1 < bodyEnd && line[i+1] == '[' {
+				end := i + 2
+				for end < bodyEnd && (line[end] < 0x40 || line[end] > 0x7E) {
+					end++
+				}
+				if end >= bodyEnd {
+					return false
+				}
+				if line[end] == 'm' {
+					params := line[i+2 : end]
+					if params == "" || params == "0" || params == "00" || strings.HasPrefix(params, "0;") {
+						next := end + 1
+						if next < bodyEnd && !(line[next] == '\x1b' && next+1 < bodyEnd && line[next+1] == '[') {
+							return false
+						}
+					}
+				}
+				i = end + 1
+				continue
+			}
+			if next := skipANSISeq(line, i); next > i && next <= bodyEnd {
+				i = next
+				continue
+			}
+		}
+		if c >= 0x20 && c < 0x7f {
+			w++
+			if w > width {
+				return false
+			}
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(line[i:bodyEnd])
+		if r == utf8.RuneError && size == 1 {
+			i++
+			continue
+		}
+		w += fastRuneWidth(r)
+		if w > width {
+			return false
+		}
+		i += size
+	}
+	return w == width
+}
+
+// nextSGRSetsBg reports whether s begins immediately with an ANSI SGR sequence that
+// explicitly sets a background color (40-47, 48;..., or 100-107).
+func nextSGRSetsBg(s string) bool {
+	if len(s) < 4 || s[0] != '\x1b' || s[1] != '[' {
+		return false
+	}
+	end := 2
+	for end < len(s) && (s[end] < 0x40 || s[end] > 0x7E) {
+		end++
+	}
+	if end >= len(s) || s[end] != 'm' {
+		return false
+	}
+	params := s[2:end]
+	if params == "" {
+		return false
+	}
+	// Parse semicolon-separated numeric codes without allocating.
+	p := 0
+	for p < len(params) {
+		semi := strings.IndexByte(params[p:], ';')
+		var tok string
+		if semi < 0 {
+			tok = params[p:]
+			p = len(params)
+		} else {
+			tok = params[p : p+semi]
+			p += semi + 1
+		}
+		switch tok {
+		case "48":
+			return true
+		case "40", "41", "42", "43", "44", "45", "46", "47",
+			"100", "101", "102", "103", "104", "105", "106", "107":
+			return true
+		case "38":
+			// Skip 38;5;N or 38;2;R;G;B so color components aren't misread as bg codes.
+			if p < len(params) {
+				subSemi := strings.IndexByte(params[p:], ';')
+				var mode string
+				if subSemi < 0 {
+					mode = params[p:]
+					p = len(params)
+				} else {
+					mode = params[p : p+subSemi]
+					p += subSemi + 1
+				}
+				skip := 0
+				if mode == "5" {
+					skip = 1
+				} else if mode == "2" {
+					skip = 3
+				}
+				for k := 0; k < skip && p < len(params); k++ {
+					ns := strings.IndexByte(params[p:], ';')
+					if ns < 0 {
+						p = len(params)
+					} else {
+						p += ns + 1
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 type ansiToken struct {
@@ -703,7 +996,7 @@ func joinTokens(tokens []ansiToken) string {
 }
 
 func wrapANSILine(seg string, width int) []string {
-	if width <= 0 || ansi.PrintableRuneWidth(seg) <= width {
+	if width <= 0 || fastPrintableWidth(seg) <= width {
 		return []string{seg}
 	}
 	tokens := tokenizeANSI(seg)
@@ -753,23 +1046,59 @@ func wrapANSILine(seg string, width int) []string {
 	return lines
 }
 
+// hasRemainingPrintable returns true as soon as any printable cell is found in s (O(1) amortized).
 func hasRemainingPrintable(s string) bool {
-	return ansi.PrintableRuneWidth(s) > 0
+	n := len(s)
+	i := 0
+	for i < n {
+		c := s[i]
+		if c == '\x1b' {
+			if next := skipANSISeq(s, i); next > i {
+				i = next
+				continue
+			}
+		}
+		if c >= 0x20 && c < 0x7f {
+			return true
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			i++
+			continue
+		}
+		if fastRuneWidth(r) > 0 {
+			return true
+		}
+		i += size
+	}
+	return false
 }
 
 // PaintLine wraps line if width > 0 and its visual width exceeds width, carries active SGR state
 // across wrapped lines, injects base (bg + defaultFg) at the start of every line and immediately
 // after every embedded \x1b[0m or \x1b[m reset, and pads to width.
 func PaintLine(line string, width int, bg, defaultFg lipgloss.Color) string {
-	line = strings.ReplaceAll(line, "\r", "")
-	line = strings.ReplaceAll(line, "\t", "    ")
+	if strings.IndexByte(line, '\r') >= 0 {
+		line = strings.ReplaceAll(line, "\r", "")
+	}
+	if strings.IndexByte(line, '\t') >= 0 {
+		line = strings.ReplaceAll(line, "\t", "    ")
+	}
 
 	var rawLines []string
-	for _, seg := range strings.Split(line, "\n") {
-		if width > 0 && ansi.PrintableRuneWidth(seg) > width {
-			rawLines = append(rawLines, wrapANSILine(seg, width)...)
+	if strings.IndexByte(line, '\n') < 0 {
+		if width > 0 && fastPrintableWidth(line) > width {
+			rawLines = wrapANSILine(line, width)
 		} else {
-			rawLines = append(rawLines, seg)
+			rawLines = []string{line}
+		}
+	} else {
+		for _, seg := range strings.Split(line, "\n") {
+			if width > 0 && fastPrintableWidth(seg) > width {
+				rawLines = append(rawLines, wrapANSILine(seg, width)...)
+			} else {
+				rawLines = append(rawLines, seg)
+			}
 		}
 	}
 
@@ -779,8 +1108,9 @@ func PaintLine(line string, width int, bg, defaultFg lipgloss.Color) string {
 
 	for _, rawLine := range rawLines {
 		var b strings.Builder
+		b.Grow(len(rawLine) + 64)
 		hasANSI := base != ""
-		if base != "" {
+		if base != "" && (len(activeSGRs) > 0 || !nextSGRSetsBg(rawLine)) {
 			b.WriteString(base)
 		}
 		for _, sgr := range activeSGRs {
@@ -792,14 +1122,16 @@ func PaintLine(line string, width int, bg, defaultFg lipgloss.Color) string {
 		lineFull := false
 
 		i := 0
-		for i < len(rawLine) {
-			if rawLine[i] == '\x1b' {
-				if i+1 < len(rawLine) && rawLine[i+1] == '[' {
+		n := len(rawLine)
+		for i < n {
+			c := rawLine[i]
+			if c == '\x1b' {
+				if i+1 < n && rawLine[i+1] == '[' {
 					end := i + 2
-					for end < len(rawLine) && (rawLine[end] < 0x40 || rawLine[end] > 0x7E) {
+					for end < n && (rawLine[end] < 0x40 || rawLine[end] > 0x7E) {
 						end++
 					}
-					if end < len(rawLine) {
+					if end < n {
 						seq := rawLine[i : end+1]
 						params := rawLine[i+2 : end]
 						termByte := rawLine[end]
@@ -807,10 +1139,11 @@ func PaintLine(line string, width int, bg, defaultFg lipgloss.Color) string {
 							hasANSI = true
 							if params == "" || params == "0" || params == "00" {
 								activeSGRs = activeSGRs[:0]
-								moreText := !lineFull && hasRemainingPrintable(rawLine[end+1:])
+								rest := rawLine[end+1:]
+								moreText := !lineFull && hasRemainingPrintable(rest)
 								if !atBaseReset && (moreText || (width > 0 && visWidth < width)) {
 									b.WriteString("\x1b[0m")
-									if base != "" {
+									if base != "" && !nextSGRSetsBg(rest) {
 										b.WriteString(base)
 									}
 									atBaseReset = true
@@ -820,7 +1153,7 @@ func PaintLine(line string, width int, bg, defaultFg lipgloss.Color) string {
 								activeSGRs = append(activeSGRs[:0], restSeq)
 								if !lineFull {
 									b.WriteString("\x1b[0m")
-									if base != "" {
+									if base != "" && !nextSGRSetsBg(restSeq) {
 										b.WriteString(base)
 									}
 									b.WriteString(restSeq)
@@ -839,14 +1172,14 @@ func PaintLine(line string, width int, bg, defaultFg lipgloss.Color) string {
 						i = end + 1
 						continue
 					}
-				} else if i+1 < len(rawLine) && rawLine[i+1] == ']' {
+				} else if i+1 < n && rawLine[i+1] == ']' {
 					end := i + 2
-					for end < len(rawLine) {
+					for end < n {
 						if rawLine[end] == '\x07' {
 							end++
 							break
 						}
-						if rawLine[end] == '\x1b' && end+1 < len(rawLine) && rawLine[end+1] == '\\' {
+						if rawLine[end] == '\x1b' && end+1 < n && rawLine[end+1] == '\\' {
 							end += 2
 							break
 						}
@@ -860,12 +1193,24 @@ func PaintLine(line string, width int, bg, defaultFg lipgloss.Color) string {
 				}
 			}
 
+			if c >= 0x20 && c < 0x7f {
+				if lineFull || (width > 0 && visWidth+1 > width) {
+					lineFull = true
+					i++
+					continue
+				}
+				b.WriteByte(c)
+				visWidth++
+				i++
+				continue
+			}
+
 			r, size := utf8.DecodeRuneInString(rawLine[i:])
 			if r == utf8.RuneError && size == 1 {
 				i++
 				continue
 			}
-			rw := runewidth.RuneWidth(r)
+			rw := fastRuneWidth(r)
 			if lineFull || (width > 0 && visWidth+rw > width) {
 				lineFull = true
 				i += size
@@ -898,10 +1243,20 @@ func PaintLine(line string, width int, bg, defaultFg lipgloss.Color) string {
 // PaintBarLine forces line onto a single visual row of exact width (truncating if wider)
 // and paints its full surface with bg and defaultFg.
 func PaintBarLine(line string, width int, bg, defaultFg lipgloss.Color) string {
-	clean := strings.ReplaceAll(line, "\r", "")
-	clean = strings.ReplaceAll(clean, "\n", " ")
-	clean = strings.ReplaceAll(clean, "\t", "    ")
-	if width > 0 && ansi.PrintableRuneWidth(clean) > width {
+	if isAlreadyPaintedLine(line, width) {
+		return line
+	}
+	clean := line
+	if strings.IndexByte(clean, '\r') >= 0 {
+		clean = strings.ReplaceAll(clean, "\r", "")
+	}
+	if strings.IndexByte(clean, '\n') >= 0 {
+		clean = strings.ReplaceAll(clean, "\n", " ")
+	}
+	if strings.IndexByte(clean, '\t') >= 0 {
+		clean = strings.ReplaceAll(clean, "\t", "    ")
+	}
+	if width > 0 && fastPrintableWidth(clean) > width {
 		clean = truncate.String(clean, uint(width))
 	}
 	return PaintLine(clean, width, bg, defaultFg)
@@ -915,10 +1270,18 @@ func PaintSurface(block string, width, height int, bg, defaultFg lipgloss.Color)
 		rawLines = strings.Split(block, "\n")
 	}
 
-	var paintedLines []string
+	paintedLines := make([]string, 0, max(len(rawLines), height))
 	for _, l := range rawLines {
+		if isAlreadyPaintedLine(l, width) {
+			paintedLines = append(paintedLines, l)
+			continue
+		}
 		res := PaintLine(l, width, bg, defaultFg)
-		paintedLines = append(paintedLines, strings.Split(res, "\n")...)
+		if strings.IndexByte(res, '\n') < 0 {
+			paintedLines = append(paintedLines, res)
+		} else {
+			paintedLines = append(paintedLines, strings.Split(res, "\n")...)
+		}
 	}
 
 	if height > 0 {

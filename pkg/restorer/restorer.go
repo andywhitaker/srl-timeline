@@ -79,7 +79,7 @@ func (r *ConfigRestorer) RestoreFullConfig(targetCommitSHA string) (bool, string
 		srlCommitID = st.CommitID
 	}
 
-	_, newSHA, recErr := r.GitBackend.RecordConfigChange(
+	recorded, newSHA, recErr := r.GitBackend.RecordConfigChange(
 		recordedCfg,
 		"admin",
 		srlCommitID,
@@ -90,6 +90,9 @@ func (r *ConfigRestorer) RestoreFullConfig(targetCommitSHA string) (bool, string
 	)
 	if recErr != nil {
 		return true, fmt.Sprintf("Restored on switch, but timeline record failed: %v", recErr), nil
+	}
+	if !recorded || newSHA == "" {
+		return true, fmt.Sprintf("No effective change — running config already matches revision %s", shortSHA), nil
 	}
 
 	newShort := newSHA
@@ -379,21 +382,32 @@ func (r *ConfigRestorer) CherryPickRestore(targetCommitSHA string, paths ...stri
 
 	// 2. Synchronously record the new running state in timeline git under the record lock
 	verifiedCfg, fetchErr := r.SRLClient.GetRunningConfig("/")
-	if fetchErr == nil && len(verifiedCfg) > 0 {
-		srlCommitID := ""
-		if st, ok := r.SRLClient.GetLatestCommitState(); ok && st.CommitID != "" {
-			srlCommitID = st.CommitID
-		}
-		_, _, _ = r.GitBackend.RecordConfigChange(
-			verifiedCfg,
-			"admin",
-			srlCommitID,
-			"",
-			time.Now().UTC(),
-			msg,
-			meta,
-		)
+	if fetchErr != nil || len(verifiedCfg) == 0 {
+		return true, fmt.Sprintf("Applied cherry-pick %s on switch, but failed to fetch verified running config: %v", pathSummary, fetchErr), nil
+	}
+	srlCommitID := ""
+	if st, ok := r.SRLClient.GetLatestCommitState(); ok && st.CommitID != "" {
+		srlCommitID = st.CommitID
+	}
+	recorded, newSHA, recErr := r.GitBackend.RecordConfigChange(
+		verifiedCfg,
+		"admin",
+		srlCommitID,
+		"",
+		time.Now().UTC(),
+		msg,
+		meta,
+	)
+	if recErr != nil {
+		return true, fmt.Sprintf("Applied cherry-pick %s on switch, but timeline record failed: %v", pathSummary, recErr), nil
+	}
+	if !recorded || newSHA == "" {
+		return true, fmt.Sprintf("No effective change — running config already matches %s from %s", pathSummary, shortSHA), nil
 	}
 
-	return true, fmt.Sprintf("Successfully cherry-picked %s to device from %s", pathSummary, shortSHA), nil
+	newShort := newSHA
+	if len(newShort) > 8 {
+		newShort = newShort[:8]
+	}
+	return true, fmt.Sprintf("Cherry-picked %s from %s (New commit: %s)", pathSummary, shortSHA, newShort), nil
 }

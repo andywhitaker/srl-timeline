@@ -14,18 +14,28 @@ import (
 
 // ConfigViewModel manages the snapshot configuration viewer.
 type ConfigViewModel struct {
-	ConfigData   map[string]interface{}
-	FormatMode   string // "cli", "json"
-	FilterPath   string
-	Zoomed       bool
-	Commit       *models.TimelineCommit
-	BaseCommit   *models.TimelineCommit
-	lastRendered string
-	emptyMsg     string
-	Viewport     viewport.Model
-	Width        int
-	Height       int
-	IsFocused    bool
+	ConfigData           map[string]interface{}
+	FormatMode           string // "cli", "json"
+	FilterPath           string
+	FilterQuery          string
+	DetailFilterBypass   bool
+	ShownLineCount       int
+	TotalUnfilteredLines int
+	Zoomed               bool
+	Commit               *models.TimelineCommit
+	BaseCommit           *models.TimelineCommit
+	lastRendered         string
+	renderedLines        []string
+	emptyMsg             string
+	Viewport             viewport.Model
+	Width                int
+	Height               int
+	IsFocused            bool
+}
+
+func (m *ConfigViewModel) setViewportLines(lines []string) {
+	m.renderedLines = lines
+	m.Viewport.SetContent(strings.Join(lines, "\n"))
 }
 
 // NewConfigViewModel creates a new configuration viewer.
@@ -41,8 +51,25 @@ func NewConfigViewModel(width, height int) ConfigViewModel {
 	return m
 }
 
+func (m ConfigViewModel) effectiveFilterQuery() string {
+	if !m.DetailFilterBypass {
+		if q := strings.TrimSpace(m.FilterPath); q != "" {
+			return q
+		}
+		return strings.TrimSpace(m.FilterQuery)
+	}
+	if q := strings.TrimSpace(m.FilterQuery); q != "" {
+		return q
+	}
+	return strings.TrimSpace(m.FilterPath)
+}
+
 func (m ConfigViewModel) hasContextStrip() bool {
 	return m.Height >= 16 && (m.Commit != nil || m.BaseCommit != nil)
+}
+
+func (m ConfigViewModel) hasFilterBanner() bool {
+	return m.effectiveFilterQuery() != "" && m.Height >= 10
 }
 
 // HeaderRows returns the number of inner rows above the scrollable viewport.
@@ -51,7 +78,49 @@ func (m ConfigViewModel) HeaderRows() int {
 	if m.hasContextStrip() {
 		rows++
 	}
+	if m.hasFilterBanner() {
+		rows++
+	}
 	return rows
+}
+
+// FilterBannerRow returns the 0-based inner row index of the filter scope banner,
+// or -1 when no filter banner is displayed.
+func (m ConfigViewModel) FilterBannerRow() int {
+	if !m.hasFilterBanner() {
+		return -1
+	}
+	if m.hasContextStrip() {
+		return 2
+	}
+	return 1
+}
+
+func (m ConfigViewModel) buildFilterBanner(innerW int) (string, int, int) {
+	q := m.effectiveFilterQuery()
+	if q == "" || !m.hasFilterBanner() {
+		return "", -1, -1
+	}
+	shown := m.ShownLineCount
+	total := m.TotalUnfilteredLines
+	if total < shown {
+		total = shown
+	}
+	return buildDetailFilterBanner(q, m.DetailFilterBypass, shown, total, "lines", "Full Config", innerW)
+}
+
+// FilterBannerHitRange returns the clickable [startX, endX) range of the Full Config / Re-scope
+// toggle button on FilterBannerRow(), relative to inner pane X=0. Returns (-1, -1) if not shown.
+func (m ConfigViewModel) FilterBannerHitRange() (startX, endX int) {
+	if !m.hasFilterBanner() {
+		return -1, -1
+	}
+	innerW := m.Width
+	if innerW < 1 {
+		innerW = 1
+	}
+	_, startX, endX = m.buildFilterBanner(innerW)
+	return startX, endX
 }
 
 func (m ConfigViewModel) viewportWidth() int {
@@ -77,6 +146,27 @@ func (m *ConfigViewModel) SetConfig(cfg map[string]interface{}, filterPath strin
 	m.emptyMsg = ""
 	m.ConfigData = cfg
 	m.FilterPath = filterPath
+	if !m.DetailFilterBypass {
+		m.FilterQuery = filterPath
+	} else if strings.TrimSpace(filterPath) != "" {
+		m.FilterQuery = filterPath
+	}
+	m.lastRendered = ""
+	m.UpdateContent()
+}
+
+// SetConfigScoped updates the config data with an explicit timeline filter query and detail bypass mode.
+func (m *ConfigViewModel) SetConfigScoped(cfg map[string]interface{}, filterQuery string, bypass bool) {
+	m.emptyMsg = ""
+	m.ConfigData = cfg
+	m.DetailFilterBypass = bypass
+	m.FilterQuery = filterQuery
+	if bypass {
+		m.FilterPath = ""
+	} else {
+		m.FilterPath = filterQuery
+	}
+	m.lastRendered = ""
 	m.UpdateContent()
 }
 
@@ -89,6 +179,10 @@ func (m *ConfigViewModel) ResetScroll() {
 func (m *ConfigViewModel) Clear(message string) {
 	m.ConfigData = nil
 	m.FilterPath = ""
+	m.FilterQuery = ""
+	m.DetailFilterBypass = false
+	m.ShownLineCount = 0
+	m.TotalUnfilteredLines = 0
 	m.Commit = nil
 	m.BaseCommit = nil
 	m.lastRendered = ""
@@ -97,12 +191,21 @@ func (m *ConfigViewModel) Clear(message string) {
 	m.UpdateContent()
 }
 
-// SetSize handles terminal resizing.
+// SetSize handles terminal resizing without needlessly re-rendering when width is unchanged.
 func (m *ConfigViewModel) SetSize(width, height int) {
+	if m.Width == width && m.Height == height {
+		return
+	}
+	prevW := m.Width
+	prevHasCtx := m.hasContextStrip()
+	prevHasBanner := m.hasFilterBanner()
 	m.Width = width
 	m.Height = height
 	m.Viewport.Width = m.viewportWidth()
 	m.Viewport.Height = m.viewportHeight()
+	if prevW == width && prevHasCtx == m.hasContextStrip() && prevHasBanner == m.hasFilterBanner() && m.lastRendered != "" {
+		return
+	}
 	m.lastRendered = ""
 	m.UpdateContent()
 }
@@ -121,56 +224,90 @@ func (m *ConfigViewModel) UpdateContent() {
 
 	if m.emptyMsg != "" {
 		m.lastRendered = ""
+		m.ShownLineCount = 0
+		m.TotalUnfilteredLines = 0
 		msg := lipgloss.NewStyle().Foreground(ColorMuted).Render("  " + m.emptyMsg)
-		m.Viewport.SetContent(PaintLine("", wrapW, ColorPanel, ColorMuted) + "\n" + PaintLine(msg, wrapW, ColorPanel, ColorMuted))
+		m.setViewportLines([]string{
+			PaintLine("", wrapW, ColorPanel, ColorMuted),
+			PaintLine(msg, wrapW, ColorPanel, ColorMuted),
+		})
 		m.Viewport.SetYOffset(0)
 		return
 	}
 
 	if len(m.ConfigData) == 0 {
 		m.lastRendered = ""
+		m.ShownLineCount = 0
+		m.TotalUnfilteredLines = 0
 		msg := lipgloss.NewStyle().Foreground(ColorMuted).Render("  No configuration data available for this revision.")
-		m.Viewport.SetContent(PaintLine("", wrapW, ColorPanel, ColorMuted) + "\n" + PaintLine(msg, wrapW, ColorPanel, ColorMuted))
+		m.setViewportLines([]string{
+			PaintLine("", wrapW, ColorPanel, ColorMuted),
+			PaintLine(msg, wrapW, ColorPanel, ColorMuted),
+		})
 		return
 	}
 
+	activeQ := m.effectiveFilterQuery()
+	highlightMatches := m.DetailFilterBypass && activeQ != ""
 	var outLines []string
 
 	if m.FormatMode != "json" {
-		lines := normalizer.JSONToFlatCLI(m.ConfigData, "")
-		if m.FilterPath != "" {
-			lines = filter.FilterCLILines(lines, m.FilterPath)
+		allLines := normalizer.JSONToFlatCLI(m.ConfigData, "")
+		m.TotalUnfilteredLines = len(allLines)
+		lines := allLines
+		if !m.DetailFilterBypass && activeQ != "" {
+			lines = filter.FilterCLILines(allLines, activeQ)
 		}
+		m.ShownLineCount = len(lines)
 		if len(lines) == 0 {
 			m.lastRendered = ""
-			warn := lipgloss.NewStyle().Foreground(ColorWarning).Render(fmt.Sprintf("  No CLI configuration statements match filter '%s'", m.FilterPath))
-			m.Viewport.SetContent(PaintLine("", wrapW, ColorPanel, ColorWarning) + "\n" + PaintLine(warn, wrapW, ColorPanel, ColorWarning))
+			warn := lipgloss.NewStyle().Foreground(ColorWarning).Render(fmt.Sprintf("  No CLI configuration statements match filter '%s'", activeQ))
+			m.setViewportLines([]string{
+				PaintLine("", wrapW, ColorPanel, ColorWarning),
+				PaintLine(warn, wrapW, ColorPanel, ColorWarning),
+			})
 			return
 		}
 
 		digits := gutterDigitsForCount(len(lines))
 		for idx, l := range lines {
 			styled := highlightSRLinuxCLI(l, ColorPanel)
-			outLines = append(outLines, formatGutteredWrappedLines(idx+1, digits, styled, wrapW, ColorPanel, ColorText)...)
+			matched := highlightMatches && filter.LineMatchesQuery(l, activeQ)
+			outLines = append(outLines, formatGutteredWrappedLinesMarked(idx+1, digits, styled, wrapW, ColorPanel, ColorText, matched)...)
 		}
 	} else {
-		data := m.ConfigData
-		if m.FilterPath != "" {
-			data = filter.FilterConfigSubtree(data, m.FilterPath)
+		fullJSONStr, _ := normalizer.CanonicalJSONString(m.ConfigData, 2)
+		totalJSONLines := 0
+		if fullJSONStr != "" {
+			totalJSONLines = strings.Count(fullJSONStr, "\n") + 1
 		}
-		if len(data) == 0 {
-			m.lastRendered = ""
-			warn := lipgloss.NewStyle().Foreground(ColorWarning).Render(fmt.Sprintf("  No JSON configuration subtrees match filter '%s'", m.FilterPath))
-			m.Viewport.SetContent(PaintLine("", wrapW, ColorPanel, ColorWarning) + "\n" + PaintLine(warn, wrapW, ColorPanel, ColorWarning))
-			return
+		m.TotalUnfilteredLines = totalJSONLines
+
+		var lines []string
+		if !m.DetailFilterBypass && activeQ != "" {
+			data := filter.FilterConfigSubtree(m.ConfigData, activeQ)
+			if len(data) == 0 {
+				m.ShownLineCount = 0
+				m.lastRendered = ""
+				warn := lipgloss.NewStyle().Foreground(ColorWarning).Render(fmt.Sprintf("  No JSON configuration subtrees match filter '%s'", activeQ))
+				m.setViewportLines([]string{
+					PaintLine("", wrapW, ColorPanel, ColorWarning),
+					PaintLine(warn, wrapW, ColorPanel, ColorWarning),
+				})
+				return
+			}
+			jsonStr, _ := normalizer.CanonicalJSONString(data, 2)
+			lines = strings.Split(jsonStr, "\n")
+		} else {
+			lines = strings.Split(fullJSONStr, "\n")
 		}
-		jsonStr, _ := normalizer.CanonicalJSONString(data, 2)
-		lines := strings.Split(jsonStr, "\n")
+		m.ShownLineCount = len(lines)
 
 		digits := gutterDigitsForCount(len(lines))
 		for idx, l := range lines {
 			styled := highlightJSONLine(l, ColorPanel)
-			outLines = append(outLines, formatGutteredWrappedLines(idx+1, digits, styled, wrapW, ColorPanel, ColorTextPrimary)...)
+			matched := highlightMatches && filter.LineMatchesQuery(l, activeQ)
+			outLines = append(outLines, formatGutteredWrappedLinesMarked(idx+1, digits, styled, wrapW, ColorPanel, ColorTextPrimary, matched)...)
 		}
 	}
 
@@ -184,6 +321,7 @@ func (m *ConfigViewModel) UpdateContent() {
 		return
 	}
 	m.lastRendered = content
+	m.renderedLines = outLines
 	prevY := m.Viewport.YOffset
 	m.Viewport.SetContent(content)
 	if prevY > 0 {
@@ -191,18 +329,19 @@ func (m *ConfigViewModel) UpdateContent() {
 	}
 }
 
-// highlightJSONLine performs quote-aware JSON syntax highlighting so IPv6 addresses,
-// MAC addresses, timestamps, booleans, numbers, and null values render accurately.
+// highlightJSONLine performs quote-aware JSON syntax highlighting using cached SGR prefixes
+// so IPv6 addresses, MAC addresses, timestamps, booleans, numbers, and null values render accurately and fast.
 func highlightJSONLine(line string, bg lipgloss.Color) string {
 	var b strings.Builder
-	keyStyle := StyleConfigKey.Background(bg)
-	strStyle := StyleConfigValue.Background(bg)
-	punctStyle := StyleConfigPunctuation.Background(bg)
-	numStyle := lipgloss.NewStyle().Foreground(ColorSyntaxACL).Background(bg)
-	boolStyle := lipgloss.NewStyle().Foreground(ColorPurple).Bold(true).Background(bg)
-	nullStyle := lipgloss.NewStyle().Foreground(ColorMuted).Italic(true).Background(bg)
-	spaceStyle := lipgloss.NewStyle().Background(bg)
-	defaultStyle := StyleConfigDefault.Background(bg)
+	b.Grow(len(line) + 64)
+	keySGR := styleSGR(bg, ColorSyntaxInterface, true, false, false)
+	strSGR := styleSGR(bg, ColorSyntaxValue, false, false, false)
+	punctSGR := styleSGR(bg, ColorMuted, false, false, false)
+	numSGR := styleSGR(bg, ColorSyntaxACL, false, false, false)
+	boolSGR := styleSGR(bg, ColorPurple, true, false, false)
+	nullSGR := styleSGR(bg, ColorMuted, false, true, false)
+	spaceSGR := styleSGR(bg, "", false, false, false)
+	defaultSGR := styleSGR(bg, ColorText, false, false, false)
 
 	n := len(line)
 	i := 0
@@ -215,7 +354,7 @@ func highlightJSONLine(line string, bg lipgloss.Color) string {
 			for i < n && (line[i] == ' ' || line[i] == '\t') {
 				i++
 			}
-			b.WriteString(spaceStyle.Render(line[start:i]))
+			b.WriteString(wrapSGR(spaceSGR, line[start:i]))
 			continue
 		}
 
@@ -241,17 +380,26 @@ func highlightJSONLine(line string, bg lipgloss.Color) string {
 				look++
 			}
 			if look < n && line[look] == ':' {
-				b.WriteString(keyStyle.Render(lit))
+				b.WriteString(wrapSGR(keySGR, lit))
 			} else {
-				b.WriteString(strStyle.Render(lit))
+				b.WriteString(wrapSGR(strSGR, lit))
 			}
 			continue
 		}
 
-		// Structural punctuation
+		// Structural punctuation (coalesce consecutive punctuation like `},` or `": `)
 		if ch == '{' || ch == '}' || ch == '[' || ch == ']' || ch == ':' || ch == ',' {
-			b.WriteString(punctStyle.Render(line[i : i+1]))
+			start := i
 			i++
+			for i < n {
+				c := line[i]
+				if c == '{' || c == '}' || c == '[' || c == ']' || c == ':' || c == ',' {
+					i++
+					continue
+				}
+				break
+			}
+			b.WriteString(wrapSGR(punctSGR, line[start:i]))
 			continue
 		}
 
@@ -264,29 +412,29 @@ func highlightJSONLine(line string, bg lipgloss.Color) string {
 			for i < n && ((line[i] >= '0' && line[i] <= '9') || line[i] == '.' || line[i] == 'e' || line[i] == 'E' || line[i] == '+' || line[i] == '-') {
 				i++
 			}
-			b.WriteString(numStyle.Render(line[start:i]))
+			b.WriteString(wrapSGR(numSGR, line[start:i]))
 			continue
 		}
 
 		// Keywords: true, false, null
 		if strings.HasPrefix(line[i:], "true") && isJSONDelimAfter(line, i+4) {
-			b.WriteString(boolStyle.Render("true"))
+			b.WriteString(wrapSGR(boolSGR, "true"))
 			i += 4
 			continue
 		}
 		if strings.HasPrefix(line[i:], "false") && isJSONDelimAfter(line, i+5) {
-			b.WriteString(boolStyle.Render("false"))
+			b.WriteString(wrapSGR(boolSGR, "false"))
 			i += 5
 			continue
 		}
 		if strings.HasPrefix(line[i:], "null") && isJSONDelimAfter(line, i+4) {
-			b.WriteString(nullStyle.Render("null"))
+			b.WriteString(wrapSGR(nullSGR, "null"))
 			i += 4
 			continue
 		}
 
 		// Fallback single character
-		b.WriteString(defaultStyle.Render(line[i : i+1]))
+		b.WriteString(wrapSGR(defaultSGR, line[i:i+1]))
 		i++
 	}
 
@@ -355,12 +503,16 @@ func (m ConfigViewModel) View() string {
 	if m.hasContextStrip() {
 		sections = append(sections, renderCommitContextStrip(m.Commit, m.BaseCommit, false, nil, innerW))
 	}
+	if m.hasFilterBanner() {
+		bannerLine, _, _ := m.buildFilterBanner(innerW)
+		sections = append(sections, bannerLine)
+	}
 
 	vpH := innerH - len(sections)
 	if vpH < 1 {
 		vpH = 1
 	}
-	vpView := renderViewportWithScrollbar(m.Viewport, innerW, vpH, ColorPanel)
+	vpView := renderLinesWithScrollbar(m.renderedLines, m.Viewport, innerW, vpH, ColorPanel)
 	sections = append(sections, vpView)
 
 	body := strings.Join(sections, "\n")
